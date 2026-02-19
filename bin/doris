@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""
+Doris CLI - Chat with Doris and manage users.
+
+Usage:
+    doris "what's on my calendar?"        # Chat (default)
+    doris users list                      # List all users
+    doris users add jane --name "Jane"    # Add a user
+    doris services list                   # List available services
+    doris services status                 # Show service connection status
+"""
+
+import sys
+import os
+import json
+import argparse
+import urllib.request
+import urllib.error
+import socket
+
+# Add project root to path for local imports when running from project
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+# Server URLs — configure DORIS_REMOTE_URL for Tailscale/remote access
+LOCAL_URL = "http://localhost:8000"
+TAILSCALE_URL = os.environ.get("DORIS_REMOTE_URL", "http://localhost:8000")
+
+
+def is_local():
+    """Check if we're running on the Doris host machine."""
+    # Override via environment variable, or fall back to hostname detection
+    local_hostname = os.environ.get("DORIS_HOST_PATTERN", "")
+    if not local_hostname:
+        return True  # Default to local if no pattern configured
+    try:
+        hostname = socket.gethostname()
+        return local_hostname.lower() in hostname.lower()
+    except:
+        return False
+
+
+def get_server_url(force_local=False, force_remote=False):
+    """Determine which server URL to use."""
+    if force_local:
+        return LOCAL_URL
+    if force_remote:
+        return TAILSCALE_URL
+    return LOCAL_URL if is_local() else TAILSCALE_URL
+
+
+def chat(message: str, server_url: str, user: str = None) -> dict:
+    """Send a message to Doris and get the response."""
+    url = f"{server_url}/chat/text"
+    payload = {"message": message}
+    if user:
+        payload["user"] = user
+    data = json.dumps(payload).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        return {"error": f"Connection failed: {e.reason}"}
+    except socket.timeout:
+        return {"error": "Request timed out (Doris might be thinking hard)"}
+
+
+def check_server(server_url: str) -> bool:
+    """Check if the server is reachable."""
+    try:
+        req = urllib.request.Request(f"{server_url}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except:
+        return False
+
+
+def interactive_mode(server_url: str, user: str = None):
+    """Run in interactive chat mode."""
+    user_str = f" as {user}" if user else ""
+    print(f"Doris CLI{user_str} (connected to {server_url})")
+    print("Type 'exit' or Ctrl+C to quit.\n")
+
+    while True:
+        try:
+            message = input("You: ").strip()
+            if not message:
+                continue
+            if message.lower() in ("exit", "quit", "bye"):
+                print("Goodbye!")
+                break
+
+            result = chat(message, server_url, user=user)
+            if "error" in result:
+                print(f"Error: {result['error']}")
+            else:
+                print(f"Doris: {result.get('response', 'No response')}\n")
+        except KeyboardInterrupt:
+            print("\nGoodbye!")
+            break
+        except EOFError:
+            break
+
+
+# =============================================================================
+# User Management Commands
+# =============================================================================
+
+def cmd_users_list(args):
+    """List all users."""
+    from users import get_user_manager
+    mgr = get_user_manager()
+    users = mgr.list_users()
+
+    if not users:
+        print("No users configured.")
+        return
+
+    print(f"{'ID':<10} {'Name':<15} {'Role':<10} {'Services'}")
+    print("-" * 50)
+    for user in users:
+        services = mgr.list_user_services(user.id)
+        svc_str = ", ".join(services) if services else "(none)"
+        print(f"{user.id:<10} {user.name:<15} {user.role:<10} {svc_str}")
+
+
+def cmd_users_add(args):
+    """Add a new user."""
+    from users import get_user_manager
+    mgr = get_user_manager()
+
+    try:
+        user = mgr.create_user(
+            user_id=args.user_id,
+            name=args.name or args.user_id.title(),
+            role=args.role
+        )
+        print(f"Created user: {user.id} ({user.name})")
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_users_remove(args):
+    """Remove a user."""
+    from users import get_user_manager
+    mgr = get_user_manager()
+
+    if mgr.delete_user(args.user_id):
+        print(f"Removed user: {args.user_id}")
+    else:
+        print(f"Error: User '{args.user_id}' not found", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_users_show(args):
+    """Show details for a user."""
+    from users import get_user_manager
+    mgr = get_user_manager()
+
+    user = mgr.get_user(args.user_id)
+    if not user:
+        print(f"Error: User '{args.user_id}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"User: {user.id}")
+    print(f"Name: {user.name}")
+    print(f"Role: {user.role}")
+    print(f"Created: {user.created_at}")
+
+    if user.preferences:
+        print("\nPreferences:")
+        for key, value in user.preferences.items():
+            print(f"  {key}: {value}")
+
+    services = mgr.list_user_services(user.id)
+    print(f"\nConnected Services: {', '.join(services) if services else '(none)'}")
+
+
+# =============================================================================
+# Service Management Commands
+# =============================================================================
+
+def cmd_services_list(args):
+    """List all available services."""
+    from users import list_all_services
+
+    services = list_all_services()
+
+    print(f"{'Service':<20} {'Type':<10} {'Scope':<10} {'Description'}")
+    print("-" * 70)
+    for svc in services:
+        scope = "Per-user" if svc["siloed"] else "Shared"
+        print(f"{svc['name']:<20} {svc['type']:<10} {scope:<10} {svc['description']}")
+
+
+def cmd_services_status(args):
+    """Show service connection status for all users."""
+    from users import get_user_manager
+    mgr = get_user_manager()
+
+    status = mgr.get_service_status()
+
+    print(f"{'User':<10} {'Service':<20} {'Status':<15}")
+    print("-" * 50)
+
+    current_user = None
+    for item in status:
+        # Add separator between users
+        if item["user"] != current_user:
+            if current_user is not None:
+                print("-" * 50)
+            current_user = item["user"]
+
+        status_str = "Connected" if item["connected"] else "Not connected"
+        status_icon = "+" if item["connected"] else "-"
+        print(f"{item['user_name']:<10} {item['service_name']:<20} {status_icon} {status_str}")
+
+
+def cmd_services_connect(args):
+    """Connect a service for a user (placeholder - OAuth flow TODO)."""
+    print(f"Would connect {args.service} for {args.user_id}")
+    print("Note: OAuth flow not yet implemented.")
+    print("For now, manually place credential files in ~/.doris/credentials/<user>/<service>.json")
+
+
+def cmd_services_disconnect(args):
+    """Disconnect a service for a user."""
+    from users import get_user_manager
+    mgr = get_user_manager()
+
+    if mgr.disconnect_service(args.user_id, args.service):
+        print(f"Disconnected {args.service} for {args.user_id}")
+    else:
+        print(f"Error: Service '{args.service}' not connected for '{args.user_id}'", file=sys.stderr)
+        sys.exit(1)
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
+    # First, check if this is a chat message or a subcommand
+    # Strip flags to find the first positional argument
+    remaining_args = []
+    skip_next = False
+    for i, arg in enumerate(sys.argv[1:]):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in ["-u", "--user"]:
+            skip_next = True  # Skip the next arg (user value)
+            continue
+        if arg.startswith("-"):
+            continue
+        remaining_args.append(arg)
+
+    # If first positional is not a subcommand, treat as chat
+    is_subcommand = remaining_args and remaining_args[0] in ["users", "services"]
+
+    # Create a simple parser for chat mode (no subparsers)
+    if not is_subcommand and remaining_args:
+        chat_parser = argparse.ArgumentParser(
+            description="Doris CLI - Chat with Doris",
+            formatter_class=argparse.RawDescriptionHelpFormatter
+        )
+        chat_parser.add_argument("-l", "--local", action="store_true", help="Force localhost connection")
+        chat_parser.add_argument("-r", "--remote", action="store_true", help="Force Tailscale connection")
+        chat_parser.add_argument("-v", "--verbose", action="store_true", help="Show extra info")
+        chat_parser.add_argument("-u", "--user", help="Specify which user is speaking")
+        chat_parser.add_argument("message", nargs="+", help="Message to send to Doris")
+
+        args = chat_parser.parse_args()
+        server_url = get_server_url(force_local=args.local, force_remote=args.remote)
+        message = " ".join(args.message)
+
+        result = chat(message, server_url, user=args.user)
+        if "error" in result:
+            print(f"Error: {result['error']}", file=sys.stderr)
+            sys.exit(1)
+
+        print(result.get("response", "No response"))
+        if args.verbose:
+            print(f"\n[{result.get('source', '?')}, {result.get('latency_ms', '?')}ms]", file=sys.stderr)
+        return
+
+    # Full parser with subcommands
+    parser = argparse.ArgumentParser(
+        description="Doris CLI - Chat and admin commands",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+
+    # Global options (for chat mode)
+    parser.add_argument("-l", "--local", action="store_true", help="Force localhost connection")
+    parser.add_argument("-r", "--remote", action="store_true", help="Force Tailscale connection")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show extra info")
+    parser.add_argument("-u", "--user", help="Specify which user is speaking")
+    parser.add_argument("--check", action="store_true", help="Check server connectivity")
+
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # -------------------------------------------------------------------------
+    # Users subcommand
+    # -------------------------------------------------------------------------
+    users_parser = subparsers.add_parser("users", help="User management")
+    users_sub = users_parser.add_subparsers(dest="users_command")
+
+    # doris users list
+    users_list = users_sub.add_parser("list", help="List all users")
+    users_list.set_defaults(func=cmd_users_list)
+
+    # doris users add <id> --name <name>
+    users_add = users_sub.add_parser("add", help="Add a new user")
+    users_add.add_argument("user_id", help="User ID (lowercase, no spaces)")
+    users_add.add_argument("--name", help="Display name")
+    users_add.add_argument("--role", default="user", choices=["admin", "user"], help="User role")
+    users_add.set_defaults(func=cmd_users_add)
+
+    # doris users remove <id>
+    users_remove = users_sub.add_parser("remove", help="Remove a user")
+    users_remove.add_argument("user_id", help="User ID to remove")
+    users_remove.set_defaults(func=cmd_users_remove)
+
+    # doris users show <id>
+    users_show = users_sub.add_parser("show", help="Show user details")
+    users_show.add_argument("user_id", help="User ID to show")
+    users_show.set_defaults(func=cmd_users_show)
+
+    # -------------------------------------------------------------------------
+    # Services subcommand
+    # -------------------------------------------------------------------------
+    services_parser = subparsers.add_parser("services", help="Service management")
+    services_sub = services_parser.add_subparsers(dest="services_command")
+
+    # doris services list
+    services_list = services_sub.add_parser("list", help="List available services")
+    services_list.set_defaults(func=cmd_services_list)
+
+    # doris services status
+    services_status = services_sub.add_parser("status", help="Show connection status")
+    services_status.set_defaults(func=cmd_services_status)
+
+    # doris services connect <user> <service>
+    services_connect = services_sub.add_parser("connect", help="Connect a service (OAuth)")
+    services_connect.add_argument("user_id", help="User ID")
+    services_connect.add_argument("service", help="Service to connect")
+    services_connect.set_defaults(func=cmd_services_connect)
+
+    # doris services disconnect <user> <service>
+    services_disconnect = services_sub.add_parser("disconnect", help="Disconnect a service")
+    services_disconnect.add_argument("user_id", help="User ID")
+    services_disconnect.add_argument("service", help="Service to disconnect")
+    services_disconnect.set_defaults(func=cmd_services_disconnect)
+
+    # -------------------------------------------------------------------------
+    # Parse and dispatch
+    # -------------------------------------------------------------------------
+
+    args = parser.parse_args()
+
+    # Check mode
+    if args.check:
+        local_ok = check_server(LOCAL_URL)
+        remote_ok = check_server(TAILSCALE_URL)
+        server_url = get_server_url(force_local=args.local, force_remote=args.remote)
+        print(f"Local  ({LOCAL_URL}): {'OK' if local_ok else 'FAIL'}")
+        print(f"Remote ({TAILSCALE_URL}): {'OK' if remote_ok else 'FAIL'}")
+        print(f"Default: {server_url}")
+        sys.exit(0 if (local_ok or remote_ok) else 1)
+
+    # Dispatch to subcommand
+    if hasattr(args, "func"):
+        args.func(args)
+    elif args.command == "users":
+        cmd_users_list(args)  # Default to list
+    elif args.command == "services":
+        cmd_services_list(args)  # Default to list
+    else:
+        # No command and no message - interactive mode
+        server_url = get_server_url(force_local=args.local, force_remote=args.remote)
+        if not check_server(server_url):
+            print(f"Error: Cannot connect to Doris at {server_url}")
+            sys.exit(1)
+        interactive_mode(server_url, user=args.user)
+
+
+if __name__ == "__main__":
+    main()

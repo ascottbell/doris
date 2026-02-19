@@ -1,0 +1,91 @@
+# MCP Server Configuration for Doris
+#
+# Each server can be either:
+#   - stdio: Local subprocess (command + args)
+#   - http: Remote HTTP/SSE endpoint (url + optional auth)
+#
+# Set enabled: true to activate a server
+#
+# Paths below use placeholders — update for your environment.
+
+mcp_servers:
+  # Apple Music - control music playback
+  # Install: uvx mcp-applemusic (or uv pip install mcp-applemusic)
+  apple-music:
+    type: stdio
+    command: uvx
+    args: ["mcp-applemusic"]
+    enabled: true
+    trust_level: trusted
+
+  # Home Assistant - smart home control
+  # Update the URL to your HA instance
+  home-assistant:
+    type: http
+    url: ${HA_URL}/api/mcp  # Set HA_URL in your .env
+    token_env: HA_TOKEN  # Will use $HA_TOKEN for Bearer auth
+    enabled: false  # Enable after configuring HA_URL and HA_TOKEN
+    trust_level: trusted
+
+  # Doris Memory - persistent memory system
+  doris-memory:
+    type: stdio
+    command: python  # Point to your venv python if needed
+    args: ["-m", "mcp_server.server"]
+    enabled: true
+    trust_level: builtin
+
+  # GitHub - repo and PR access
+  github:
+    type: stdio
+    command: github-mcp-server  # Install or provide full path
+    args: ["stdio"]
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      GITHUB_TOOLSETS: "repos,pull_requests"
+    enabled: false  # Enable after setting GITHUB_PERSONAL_ACCESS_TOKEN
+    trust_level: trusted
+
+  # Apple Notes - search, read, create notes
+  # Install: uv pip install apple-notes-mcp
+  # REQUIRES: Full Disk Access for Python in System Settings > Privacy & Security
+  apple-notes:
+    type: stdio
+    command: uvx
+    args: ["apple-notes-mcp"]
+    enabled: false  # Enable after granting Full Disk Access
+    trust_level: trusted
+
+  # Filesystem - read, write, search files
+  # Update paths for your environment
+  filesystem:
+    type: stdio
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem"
+      - "~/Desktop"
+      - "~/Downloads"
+      - "~/Documents"
+      - "~/Projects"
+    enabled: false  # Enable and update paths for your environment
+    trust_level: sandboxed
+
+  # Apple Shortcuts - run macOS Shortcuts automations
+  # Pinned to specific version to prevent NPM supply-chain attacks
+  apple-shortcuts:
+    type: stdio
+    command: npx
+    args: ["-y", "mcp-server-apple-shortcuts@1.0.1"]
+    enabled: false  # Enable manually after reviewing Shortcuts permissions
+    trust_level: sandboxed
+
+  # Brave Search - web search capability
+  brave-search:
+    type: stdio
+    command: npx
+    args: ["-y", "@brave/brave-search-mcp-server"]
+    env:
+      BRAVE_API_KEY: "${BRAVE_API_KEY}"
+    enabled: false  # Enable after setting BRAVE_API_KEY
+    trust_level: sandboxed

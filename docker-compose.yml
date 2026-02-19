@@ -1,0 +1,72 @@
+# Doris — Docker Compose
+#
+# Quick start:
+#   cp .env.example .env
+#   # Edit .env — set ANTHROPIC_API_KEY at minimum
+#   docker compose up -d
+#
+# Doris needs Ollama running for embeddings. Two options:
+#   1. Run Ollama on the host (default — uses host.docker.internal)
+#   2. Uncomment the ollama service below to run it in Docker
+#
+# macOS-specific features (iMessage, Apple Music, Reminders, Contacts)
+# are not available in Docker. Everything else works: chat, memory,
+# email, weather, channels (Telegram/Discord/Webhook), scouts, etc.
+
+services:
+  doris:
+    build: .
+    container_name: doris
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+      # Uncomment if using BlueBubbles or Webhook channel adapters.
+      # If the calling service is on another machine (e.g., Tailscale), change
+      # 127.0.0.1 to 0.0.0.0 or the appropriate interface address.
+      # - "127.0.0.1:8765:8765"   # BlueBubbles webhook listener
+      # - "127.0.0.1:8766:8766"   # Generic webhook listener
+    env_file: .env
+    environment:
+      # Ollama endpoint — adjust if running Ollama somewhere other than the host
+      - OLLAMA_HOST=http://host.docker.internal:11434
+    volumes:
+      - doris_data:/app/data
+      - doris_logs:/app/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  # Optional: run Ollama in Docker instead of on the host.
+  # Uncomment this service and change OLLAMA_HOST above to http://ollama:11434
+  #
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: doris-ollama
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   # Uncomment for GPU acceleration (NVIDIA):
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #   #           capabilities: [gpu]
+
+volumes:
+  doris_data:
+  doris_logs:
+  # ollama_data:

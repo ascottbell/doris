@@ -1,0 +1,38 @@
+# Secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+credentials/
+token.json
+satellites/secrets.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Logs and data
+logs/
+*.log
+data/*.db
+
+# IDE
+.idea/
+.vscode/
+tools/temp_sensor_src/
+
+# Large model files and Swift build
+mlx_models/
+swift/DorisSTT/.build/
+
+# Downloaded binaries (can be re-fetched)
+bin/github-mcp-server
+
+# ESPHome build artifacts
+satellites/.esphome/
