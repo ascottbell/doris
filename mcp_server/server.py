@@ -207,7 +207,8 @@ def doris_memory_query(
     query: str,
     limit: int = 10,
     category: Optional[str] = None,
-    use_semantic: bool = True
+    use_semantic: bool = True,
+    min_relevance: float = 0.5
 ) -> dict:
     """
     Search memories using semantic or keyword search.
@@ -219,9 +220,10 @@ def doris_memory_query(
         limit: Maximum number of results (default 10)
         category: Optional filter by category (identity, family, preference, project, decision, etc.)
         use_semantic: If True, use embedding-based search. If False, use keyword search.
+        min_relevance: Minimum cosine similarity (0-1) for semantic results. Default 0.5 filters noise.
 
     Returns:
-        List of matching memories with content, category, subject, and relevance.
+        List of matching memories with content, category, subject, and relevance score.
     """
     # Validate inputs
     if len(query) > MAX_QUERY_LENGTH:
@@ -239,6 +241,9 @@ def doris_memory_query(
             limit=limit,
             category=category
         )
+        # Filter out low-relevance noise
+        if min_relevance > 0:
+            results = [r for r in results if r.get('relevance', 1.0) >= min_relevance]
     else:
         # Keyword search via FTS (category filter is applied in the SQL query)
         results = search_fts(query, limit=limit, category=category)
@@ -377,16 +382,22 @@ def doris_memory_facts(
     Use this for quick retrieval of known fact categories.
 
     Args:
-        category: Category to retrieve. Options:
+        category: Category to retrieve. Common categories:
             - identity: Core facts about the user
             - family: Family members and context
             - preference: How the user likes to work
             - project: Active and past projects
             - decision: Decisions made in conversations
-            - person: People the user works with
-            - event: Calendar/time-based memories
             - learning: Things discovered/learned
-            - conversation: Rich session summaries with reasoning and open questions
+            - behavior: Behavioral patterns from sleep reviews
+            - relationship: Interpersonal connections
+            - reminder: Follow-ups and to-dos
+            - event: Calendar/time-based memories
+            - person: People the user works with
+            - fact: General facts
+            - contact: Contact info
+            - history: Historical context
+            Any string is accepted — these are the most common.
         limit: Maximum results (default 20)
         subject: Optional filter by subject (e.g., "Alice", "MyProject")
 
