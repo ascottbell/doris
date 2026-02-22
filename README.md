@@ -98,7 +98,7 @@ macOS-specific features (iMessage, Apple Music, Reminders, Contacts) aren't avai
 │  9 scouts monitoring: email, calendar, weather,         │
 │  reminders, health, location, time, system, memory      │
 │                                                         │
-│  Daemon → Observation → Escalation → Notification       │
+│  Daemon → Observation → Sitrep Review → Notification     │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -150,7 +150,12 @@ Scouts are lightweight agents that monitor your environment on a schedule and su
 | **System** | Server health, MCP connections, disk space | Every 15 min |
 | **Memory** | Consolidation and maintenance triggers | Daily |
 
-Scouts don't act on their own — they create **observations** with a relevance score. The daemon collects observations, deduplicates them, and escalates the important ones to Doris's brain for a decision. Doris (running on the default model) decides what's worth notifying you about, using maasv's wisdom system to check past outcomes for similar situations.
+Scouts don't act on their own — they create **observations** with a relevance score. The daemon routes observations through a **sitrep engine** that separates them into two lanes:
+
+- **Instant lane** — Life-safety emergencies (smoke detectors, CO alarms, water leaks) bypass review and notify you immediately.
+- **Sitrep lane** — Everything else. Observations accumulate in a buffer, and every 30 minutes Doris reviews the consolidated situation report with full context: what she's already told you (notification ledger, 72-hour window), what conditions she's tracking, and the current time/day context. She makes editorial decisions — **NOTIFY** (send now), **HOLD** (include in next morning/evening brief), or **DISMISS** (noise, already covered) — so you get one thoughtful notification instead of seven about the same snowstorm.
+
+This design exists because the old system used content hashing for dedup, which broke whenever scout output changed slightly (precipitation drifting from 94% to 89% produced different hashes, bypassing dedup). The fix wasn't better hashing — it was putting the intelligence in the right place. Scouts observe; Doris decides.
 
 The scout framework is extensible. To build your own:
 
@@ -332,7 +337,8 @@ doris/
 ├── tools/               # Tool implementations (calendar, email, weather, etc.)
 ├── mcp_client/          # MCP server connections + trust tiers
 ├── mcp_server/          # Doris Memory MCP server (expose memory via MCP)
-├── daemon.py            # Autonomous scout scheduler + escalation
+├── daemon/              # Sitrep engine, digest, scheduler, scout health
+├── daemon.py            # Autonomous scout scheduler + sitrep review
 ├── main.py              # FastAPI application entry point
 ├── config.py            # All settings via pydantic-settings
 └── maasv_bridge.py      # Bridges Doris to the maasv cognition layer
