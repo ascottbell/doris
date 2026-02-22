@@ -2281,10 +2281,11 @@ def _execute_web_search(args: dict) -> str:
 
 class ClaudeResponse:
     """Response from Claude with token usage tracking."""
-    def __init__(self, text: str, input_tokens: int = 0, output_tokens: int = 0):
+    def __init__(self, text: str, input_tokens: int = 0, output_tokens: int = 0, tools_called: list = None):
         self.text = text
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
+        self.tools_called = tools_called or []
 
     def __str__(self):
         return self.text
@@ -2386,6 +2387,9 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
     # Track problematic tool calls to prevent retry loops
     failed_tools = {}  # tool_name -> failure count
 
+    # Track all tool calls for metadata (sitrep review uses this)
+    all_tools_called = []
+
     # Tool use loop - keep going until the LLM gives a final text response
     while iteration < max_tool_iterations:
         iteration += 1
@@ -2407,6 +2411,7 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
             tool_results = []
             for tc in response.tool_calls:
                 print(f"[tool: {tc.name}]")
+                all_tools_called.append({"name": tc.name, "args": tc.arguments})
 
                 # Check if this tool has already failed - don't let Doris retry in a loop
                 if tc.name in failed_tools and failed_tools[tc.name] >= 1:
@@ -2455,7 +2460,7 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
         )
 
         if return_usage:
-            return ClaudeResponse(final_text, total_usage.input_tokens, total_usage.output_tokens)
+            return ClaudeResponse(final_text, total_usage.input_tokens, total_usage.output_tokens, tools_called=all_tools_called)
         return final_text
 
     # Hit max iterations - something is wrong
@@ -2476,7 +2481,7 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
     )
 
     if return_usage:
-        return ClaudeResponse(fallback, total_usage.input_tokens, total_usage.output_tokens)
+        return ClaudeResponse(fallback, total_usage.input_tokens, total_usage.output_tokens, tools_called=all_tools_called)
     return fallback
 
 

@@ -69,17 +69,20 @@ class DorisScheduler:
         self,
         on_escalation: Optional[Callable[[list[Observation]], None]] = None,
         on_wake: Optional[Callable[[str, str], None]] = None,
+        on_sitrep_review: Optional[Callable[[], None]] = None,
     ):
         """
         Initialize scheduler.
 
         Args:
-            on_escalation: Callback when escalations need attention
+            on_escalation: Callback for ALL observations (sitrep engine routes them)
             on_wake: Callback for scheduled wake-ups (reason, prompt)
+            on_sitrep_review: Callback for periodic sitrep reviews (every 30 min)
         """
         self.scheduler = AsyncIOScheduler()
         self.on_escalation = on_escalation
         self.on_wake = on_wake
+        self.on_sitrep_review = on_sitrep_review
 
         # Scout instances
         self.email_scout = EmailScout()
@@ -199,6 +202,14 @@ class DorisScheduler:
             name="Reminders Scout (15 min)",
         )
 
+        # Sitrep review — consolidated observation review every 30 minutes
+        self.scheduler.add_job(
+            self._sitrep_review,
+            IntervalTrigger(minutes=30),
+            id="sitrep_review",
+            name="Sitrep Review (30 min)",
+        )
+
         # Pattern analysis jobs (daily at 3 AM — store insights to memory)
         self.scheduler.add_job(
             self._run_pattern_analysis,
@@ -245,10 +256,10 @@ class DorisScheduler:
                     level = logging.WARNING if obs.escalate else logging.INFO
                     logger.log(level, f"[{scout.name}] {obs.observation}")
 
-                # Check for escalations
-                if digest.has_escalation() and self.on_escalation:
-                    escalations = digest.get_escalations()
-                    await self._handle_escalations(escalations)
+                # Send ALL observations to sitrep engine for routing
+                # (replaces old escalation-only filtering)
+                if self.on_escalation:
+                    await self._handle_escalations(observations)
 
             # Only update heartbeat on success
             self._update_heartbeat()
@@ -328,6 +339,16 @@ class DorisScheduler:
             except Exception as e:
                 logger.error(f"Escalation handler error: {e}")
 
+    async def _sitrep_review(self) -> None:
+        """Trigger periodic sitrep review."""
+        if self.on_sitrep_review:
+            try:
+                result = self.on_sitrep_review()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.error(f"Sitrep review error: {e}")
+
     async def _morning_wake(self) -> None:
         """7 AM morning briefing trigger."""
         logger.info("Morning wake-up triggered")
@@ -355,14 +376,25 @@ class DorisScheduler:
                 logger.error(f"Evening wake error: {e}")
 
     def _build_morning_prompt(self) -> str:
-        """Build the morning briefing prompt."""
+        """Build the morning briefing prompt with overnight sitrep summary."""
         digest = get_digest()
         digest_text = digest.format_for_prompt()
+
+        # Include overnight sitrep summary if available
+        overnight_section = ""
+        try:
+            from daemon.sitrep import SitrepEngine
+            sitrep = SitrepEngine()
+            overnight = sitrep.get_overnight_summary()
+            if overnight and overnight != "No overnight activity to report.":
+                overnight_section = f"\n=== OVERNIGHT SITREP ===\n{overnight}\n"
+        except Exception as e:
+            logger.warning(f"Failed to get overnight summary: {e}")
 
         return f"""Good morning! Time for your daily briefing.
 
 {digest_text}
-
+{overnight_section}
 Please provide:
 1. Weather summary and recommendations (what to wear, umbrella needed?)
 2. Today's calendar overview

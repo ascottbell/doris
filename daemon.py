@@ -18,12 +18,11 @@ See: /Library/LaunchDaemons/com.doris.daemon.plist
 
 import asyncio
 import argparse
-import hashlib
 import json
 import signal
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import aiohttp
 
@@ -33,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from daemon.scheduler import DorisScheduler
 from daemon.digest import get_digest, save_digest
+from daemon.sitrep import SitrepEngine, LedgerEntry, ReviewLogEntry
 from scouts.base import Observation
 from config import settings
 from services.agent_channel import get_cc_completion_updates, acknowledge_message
@@ -49,12 +49,6 @@ logger = logging.getLogger("doris.daemon")
 
 # State file for tracking daemon status
 STATE_FILE = PROJECT_ROOT / "data" / "daemon_state.json"
-# Escalation buffer persistence
-ESCALATION_BUFFER_FILE = PROJECT_ROOT / "data" / "escalation_buffer.json"
-# Escalation audit log — records every evaluation for debugging
-ESCALATION_AUDIT_FILE = PROJECT_ROOT / "data" / "escalation_audit.json"
-# De-duplication state — tracks recent escalation hashes to suppress repeats
-ESCALATION_DEDUP_FILE = PROJECT_ROOT / "data" / "escalation_dedup.json"
 
 
 class DorisDaemon:
@@ -63,255 +57,122 @@ class DorisDaemon:
 
     Manages:
     - Scout scheduling via DorisScheduler
-    - Escalation handling
+    - Sitrep-based observation routing (instant lane + sitrep lane)
     - Wake-up triggers for Doris
     - Graceful shutdown
     """
 
     def __init__(self):
         self.scheduler = DorisScheduler(
-            on_escalation=self._handle_escalation,
+            on_escalation=self._handle_observation,
             on_wake=self._handle_wake,
+            on_sitrep_review=self._run_sitrep_review,
         )
         self._running = False
         self._shutdown_event = asyncio.Event()
 
-        # Escalation buffering and debouncing
-        self._escalation_buffer: list[Observation] = []
-        self._escalation_debounce_task: asyncio.Task | None = None
-        self._escalation_retry_task: asyncio.Task | None = None
+        # Sitrep engine — replaces hash-based dedup
+        self._sitrep = SitrepEngine()
+
+        # Instant lane buffering (emergencies, memory-scout critical)
+        self._instant_buffer: list[Observation] = []
+        self._instant_debounce_task: asyncio.Task | None = None
+        self._instant_retry_task: asyncio.Task | None = None
         self._debounce_seconds: float = 30.0
-        self._max_buffer_size: int = 50
         self._doris_url: str = "http://localhost:8000/chat/text"
         self._auth_headers: dict = {"Authorization": f"Bearer {settings.doris_api_token}"}
-
-        # De-duplication: hash -> ISO timestamp of last flush
-        self._recent_escalations: dict[str, str] = {}
-        self._dedup_cooldown_hours: float = 4.0
-
-        # Load persisted state from previous run
-        self._load_escalation_buffer()
-        self._load_dedup_state()
 
         # CC completion polling
         self._cc_poll_task: asyncio.Task | None = None
         self._cc_poll_interval: float = 30.0  # Check every 30 seconds
 
-    def _load_escalation_buffer(self) -> None:
-        """Load persisted escalation buffer from disk."""
-        if not ESCALATION_BUFFER_FILE.exists():
-            return
-        try:
-            data = json.loads(ESCALATION_BUFFER_FILE.read_text())
-            if not isinstance(data, list):
-                logger.warning("Escalation buffer file has invalid format, ignoring")
-                return
-            self._escalation_buffer = [Observation.from_dict(item) for item in data]
-            if self._escalation_buffer:
-                logger.info(f"Loaded {len(self._escalation_buffer)} persisted escalations from disk")
-        except Exception as e:
-            logger.error(f"Failed to load escalation buffer from disk: {e}")
+    # --- Observation Routing ---
 
-    def _save_escalation_buffer(self) -> None:
-        """Persist current escalation buffer to disk."""
-        try:
-            ESCALATION_BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
-            data = [obs.to_dict() for obs in self._escalation_buffer]
-            ESCALATION_BUFFER_FILE.write_text(json.dumps(data, indent=2))
-        except Exception as e:
-            logger.error(f"Failed to save escalation buffer to disk: {e}")
-
-    def _load_dedup_state(self) -> None:
-        """Load persisted de-duplication state from disk."""
-        if not ESCALATION_DEDUP_FILE.exists():
-            return
-        try:
-            data = json.loads(ESCALATION_DEDUP_FILE.read_text())
-            if isinstance(data, dict):
-                self._recent_escalations = data
-                self._prune_dedup_state()
-                if self._recent_escalations:
-                    logger.info(f"Loaded {len(self._recent_escalations)} de-dup entries from disk")
-        except Exception as e:
-            logger.error(f"Failed to load de-dup state from disk: {e}")
-
-    def _save_dedup_state(self) -> None:
-        """Persist de-duplication state to disk."""
-        try:
-            ESCALATION_DEDUP_FILE.parent.mkdir(parents=True, exist_ok=True)
-            ESCALATION_DEDUP_FILE.write_text(json.dumps(self._recent_escalations, indent=2))
-        except Exception as e:
-            logger.error(f"Failed to save de-dup state to disk: {e}")
-
-    def _prune_dedup_state(self) -> None:
-        """Remove de-dup entries older than the cooldown window."""
-        cutoff = datetime.now() - timedelta(hours=self._dedup_cooldown_hours)
-        cutoff_iso = cutoff.isoformat()
-        self._recent_escalations = {
-            h: ts for h, ts in self._recent_escalations.items()
-            if ts > cutoff_iso
-        }
-
-    @staticmethod
-    def _hash_escalations(observations: list[Observation]) -> str:
-        """Create a content hash from escalation observations for de-duplication."""
-        content = "\n".join(f"{obs.scout}:{obs.observation}" for obs in sorted(observations, key=lambda o: o.scout))
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
-
-    def _log_escalation_audit(
-        self,
-        observations: list[Observation],
-        http_status: int | None,
-        response_text: str | None,
-        error: str | None = None,
-    ) -> None:
+    async def _handle_observation(self, observations: list[Observation]) -> None:
         """
-        Log an escalation evaluation to the audit file.
+        Route observations through the sitrep engine.
 
-        Records: what observations were sent, what Claude responded,
-        whether a notification was sent, and any errors.
+        Instant lane observations (emergencies, memory-scout critical)
+        are debounced and flushed immediately. Everything else goes to the
+        sitrep buffer for periodic review.
         """
-        # Heuristic: detect if notify_user was likely called from Claude's response
-        notified = False
-        if response_text:
-            resp_lower = response_text.lower()
-            # Claude's response typically references notifying/sending when it used notify_user
-            notified = any(phrase in resp_lower for phrase in [
-                "notif",        # notified, notification, notify
-                "sent user",
-                "alerted user",
-                "let the user know",
-                "sent a push",
-            ])
+        instant_obs = []
 
-        entry = {
-            "timestamp": datetime.now().isoformat(),
-            "observations": [f"[{obs.scout}] {obs.observation}" for obs in observations],
-            "observation_count": len(observations),
-            "http_status": http_status,
-            "notified": notified,
-            "response": response_text,
-            "error": error,
-        }
+        for obs in observations:
+            # Memoir nudges bypass sitrep entirely — separate creative flow
+            if obs.scout == "memoir-scout":
+                instant_obs.append(obs)
+                continue
 
-        try:
-            ESCALATION_AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
-            existing = []
-            if ESCALATION_AUDIT_FILE.exists():
-                try:
-                    existing = json.loads(ESCALATION_AUDIT_FILE.read_text())
-                except (json.JSONDecodeError, ValueError):
-                    logger.warning("Escalation audit file corrupted, starting fresh")
+            result = self._sitrep.ingest(obs)
+            if result is not None:
+                # Instant lane — needs immediate attention
+                instant_obs.append(result)
 
-            existing.append(entry)
+        if instant_obs:
+            logger.warning(f"Instant lane: {len(instant_obs)} observation(s)")
+            for obs in instant_obs:
+                logger.warning(f"  [{obs.scout}] {obs.observation}")
 
-            # Keep last 500 entries to prevent unbounded growth
-            if len(existing) > 500:
-                existing = existing[-500:]
+            self._instant_buffer.extend(instant_obs)
 
-            ESCALATION_AUDIT_FILE.write_text(json.dumps(existing, indent=2))
-        except Exception as e:
-            logger.error(f"Failed to write escalation audit log: {e}")
+            # Cancel existing debounce task if any
+            if self._instant_debounce_task and not self._instant_debounce_task.done():
+                self._instant_debounce_task.cancel()
 
-    async def _handle_escalation(self, escalations: list[Observation]) -> None:
-        """
-        Handle urgent escalations from scouts.
+            # Start new debounce task
+            self._instant_debounce_task = asyncio.create_task(
+                self._debounce_and_flush_instant()
+            )
 
-        Buffers observations and debounces them for 30 seconds before
-        sending to Doris for evaluation. This prevents spam while still
-        handling urgent matters promptly.
-        """
-        logger.warning(f"🚨 {len(escalations)} escalation(s) received")
+        sitrep_count = len(observations) - len(instant_obs)
+        if sitrep_count > 0:
+            logger.info(f"Sitrep lane: {sitrep_count} observation(s) buffered "
+                        f"(total buffer: {self._sitrep.buffer_count})")
 
-        # Add to buffer
-        self._escalation_buffer.extend(escalations)
+    # --- Instant Lane (emergencies + memoir) ---
 
-        # Cap buffer size — drop oldest if exceeded
-        if len(self._escalation_buffer) > self._max_buffer_size:
-            dropped = len(self._escalation_buffer) - self._max_buffer_size
-            self._escalation_buffer = self._escalation_buffer[-self._max_buffer_size:]
-            logger.warning(f"Escalation buffer exceeded {self._max_buffer_size} — dropped {dropped} oldest")
-
-        # Persist to disk so buffer survives daemon restarts
-        self._save_escalation_buffer()
-
-        for esc in escalations:
-            logger.warning(f"  [{esc.scout}] {esc.observation}")
-
-        # Cancel existing debounce task if any
-        if self._escalation_debounce_task and not self._escalation_debounce_task.done():
-            self._escalation_debounce_task.cancel()
-
-        # Start new debounce task
-        self._escalation_debounce_task = asyncio.create_task(
-            self._debounce_and_flush()
-        )
-
-    async def _debounce_and_flush(self) -> None:
-        """Wait for debounce period then flush escalations to Doris."""
+    async def _debounce_and_flush_instant(self) -> None:
+        """Wait for debounce period then flush instant lane to Doris."""
         try:
             await asyncio.sleep(self._debounce_seconds)
-            await self._flush_escalations()
+            await self._flush_instant_lane()
         except asyncio.CancelledError:
-            logger.debug("Debounce task cancelled (new escalations received)")
+            logger.debug("Instant debounce cancelled (new observations received)")
 
-    async def _flush_escalations(self) -> None:
+    async def _flush_instant_lane(self) -> None:
         """
-        Send buffered escalations to Doris for evaluation.
+        Send instant lane observations to Doris immediately.
 
-        Formats observations into a prompt and POSTs to the chat endpoint.
-        Doris will evaluate against proactive engagement criteria and
-        optionally send push notifications if warranted.
-
-        On failure: buffer is NOT cleared, retry scheduled in 60 seconds.
-        On success: buffer and digest escalations are cleared.
-
-        Memoir nudges are handled separately - they prompt Doris to write,
-        not to evaluate whether to notify the user.
+        Memoir nudges get their own prompt. Emergency observations get
+        a direct proactive check prompt. No dedup — these are urgent.
         """
-        if not self._escalation_buffer:
+        if not self._instant_buffer:
             return
 
-        # Separate memoir nudges from other escalations
-        memoir_nudges = [obs for obs in self._escalation_buffer if obs.scout == "memoir-scout"]
-        other_escalations = [obs for obs in self._escalation_buffer if obs.scout != "memoir-scout"]
+        # Separate memoir nudges from emergencies
+        memoir_nudges = [obs for obs in self._instant_buffer if obs.scout == "memoir-scout"]
+        emergency_obs = [obs for obs in self._instant_buffer if obs.scout != "memoir-scout"]
 
-        # De-duplicate: skip if we've flushed identical escalations recently
-        if other_escalations:
-            self._prune_dedup_state()
-            esc_hash = self._hash_escalations(other_escalations)
-            if esc_hash in self._recent_escalations:
-                logger.info(f"Suppressed duplicate escalation (hash={esc_hash}, "
-                            f"last seen={self._recent_escalations[esc_hash]})")
-                # Clear the buffer — these are known duplicates, don't retry
-                other_escalations = []
-                if not memoir_nudges:
-                    # Nothing left to flush
-                    self._escalation_buffer.clear()
-                    self._save_escalation_buffer()
-                    return
+        logger.info(f"Flushing instant lane: {len(memoir_nudges)} memoir, {len(emergency_obs)} emergency")
 
-        logger.info(f"Flushing {len(self._escalation_buffer)} escalations to Doris "
-                    f"({len(memoir_nudges)} memoir, {len(other_escalations)} other)...")
-
-        # Pre-flight budget check — skip daemon API calls if budget is exhausted
+        # Pre-flight budget check
         try:
             from llm.token_budget import check_budget, BudgetExceeded
-            check_budget(15_000)  # Estimate for a typical escalation call
+            check_budget(15_000)
         except BudgetExceeded as e:
-            logger.warning(f"Skipping escalation flush — {e}. "
-                           f"Buffer retained ({len(self._escalation_buffer)} items), "
-                           "will retry when budget resets.")
+            logger.warning(f"Skipping instant flush — {e}. "
+                           f"Buffer retained ({len(self._instant_buffer)} items).")
             return
         except Exception:
-            pass  # Don't block on tracker import/init errors
+            pass
 
         all_succeeded = True
 
         try:
             timeout = aiohttp.ClientTimeout(total=45)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                # Handle memoir nudges first - prompt Doris to write
+                # Handle memoir nudges
                 if memoir_nudges:
                     memoir_prompt = (
                         "[MEMOIR TIME] It's been over a week since your last memoir entry.\n\n"
@@ -340,110 +201,215 @@ class DorisDaemon:
                         logger.error(f"Failed to send memoir nudge to Doris: {e}")
                         all_succeeded = False
 
-                # Handle other escalations - evaluate and possibly notify the user
-                if other_escalations:
-                    obs_lines = []
-                    for obs in other_escalations:
-                        # Wrap observation text in safety markers before it enters
-                        # the LLM prompt. This prevents prompt injection from external
-                        # content (email subjects, reminder titles, calendar events, etc.)
-                        # that scouts include in their observation strings.
-                        wrapped_obs = wrap_with_scan(
-                            obs.observation,
-                            source="scout_observation",
-                            scanner_source=obs.scout,
-                        )
-                        obs_lines.append(f"- [{obs.scout}] {wrapped_obs}")
-
-                    # Detect if there are email observations
-                    has_email_obs = any(obs.scout == "email-scout" for obs in other_escalations)
-
-                    email_instructions = ""
-                    if has_email_obs:
-                        email_instructions = (
-                            "\n\nFor email observations: use read_email with the message ID "
-                            "to read the full email before evaluating. If there's anything the user "
-                            "should know or act on, take action (e.g., add events to his calendar, "
-                            "flag deadlines, note schedule changes) and notify him about what you did. "
-                            "Use your judgment — if after reading it's genuinely just a newsletter "
-                            "with nothing actionable, move on."
-                        )
-
-                    other_prompt = (
-                        "[PROACTIVE CHECK] The following observations were flagged by my scouts:\n\n"
+                # Handle emergency observations — immediate notify
+                if emergency_obs:
+                    obs_lines = [f"- [{obs.scout}] {obs.observation}" for obs in emergency_obs]
+                    emergency_prompt = (
+                        "[EMERGENCY ESCALATION] The following observations require immediate attention:\n\n"
                         + "\n".join(obs_lines)
-                        + email_instructions
-                        + "\n\nIf any observations warrant notifying the user, use notify_user. "
-                        "Use priority='proactive' (default) for normal alerts, "
-                        "priority='emergency' only for safety/security alerts that must break through DND."
+                        + "\n\nThese bypassed sitrep review because they are life-safety or critical alerts. "
+                        "Notify the user immediately via notify_user with priority='emergency'."
                     )
                     try:
                         async with session.post(
                             self._doris_url,
                             headers=self._auth_headers,
-                            json={"message": other_prompt, "daemon": True}
+                            json={"message": emergency_prompt, "daemon": True, "wake_reason": "instant_escalation"}
                         ) as resp:
                             resp_text = await resp.text()
                             if resp.status >= 400:
-                                logger.error(f"Doris escalation request failed (HTTP {resp.status}): {resp_text[:200]}")
+                                logger.error(f"Doris emergency request failed (HTTP {resp.status}): {resp_text[:200]}")
                                 all_succeeded = False
-                                self._log_escalation_audit(
-                                    other_escalations, resp.status, resp_text,
-                                    error=f"HTTP {resp.status}"
-                                )
                             else:
-                                logger.info(f"Doris escalation response ({resp.status}): {resp_text[:200]}")
-                                self._log_escalation_audit(
-                                    other_escalations, resp.status, resp_text
-                                )
+                                logger.info(f"Doris emergency response ({resp.status}): {resp_text[:200]}")
+                                # Record in sitrep ledger
+                                for obs in emergency_obs:
+                                    self._sitrep.record_notification(LedgerEntry(
+                                        timestamp=datetime.now().isoformat(),
+                                        scout=obs.scout,
+                                        summary=obs.observation[:200],
+                                        priority="emergency",
+                                    ))
                     except Exception as e:
-                        logger.error(f"Failed to send escalations to Doris: {e}")
+                        logger.error(f"Failed to send emergency to Doris: {e}")
                         all_succeeded = False
-                        self._log_escalation_audit(
-                            other_escalations, None, None,
-                            error=str(e)
-                        )
 
         except Exception as e:
-            logger.error(f"Failed to create session for escalations: {e}")
+            logger.error(f"Failed to create session for instant lane: {e}")
             all_succeeded = False
 
         if all_succeeded:
-            # Record hash for de-duplication (only if we actually sent escalations)
-            if other_escalations:
-                esc_hash = self._hash_escalations(other_escalations)
-                self._recent_escalations[esc_hash] = datetime.now().isoformat()
-                self._save_dedup_state()
-
-            # Only clear on success
-            cleared_count = len(self._escalation_buffer)
-            self._escalation_buffer.clear()
-            self._save_escalation_buffer()
+            cleared_count = len(self._instant_buffer)
+            self._instant_buffer.clear()
             get_digest().clear_escalations()
-            logger.info(f"Cleared {cleared_count} escalations from buffer and digest")
+            logger.info(f"Cleared {cleared_count} instant lane observations")
         else:
-            # Leave buffer intact, schedule retry
             logger.warning(
-                f"Escalation flush failed — {len(self._escalation_buffer)} items retained, "
+                f"Instant flush failed — {len(self._instant_buffer)} items retained, "
                 "retrying in 60 seconds"
             )
-            self._schedule_escalation_retry()
+            self._schedule_instant_retry()
 
-    def _schedule_escalation_retry(self) -> None:
-        """Schedule a retry for failed escalation flush."""
-        # Don't stack retries
-        if self._escalation_retry_task and not self._escalation_retry_task.done():
+    def _schedule_instant_retry(self) -> None:
+        """Schedule a retry for failed instant lane flush."""
+        if self._instant_retry_task and not self._instant_retry_task.done():
             return
-        self._escalation_retry_task = asyncio.create_task(self._retry_escalation_flush())
+        self._instant_retry_task = asyncio.create_task(self._retry_instant_flush())
 
-    async def _retry_escalation_flush(self) -> None:
-        """Wait 60 seconds then retry flushing escalations."""
+    async def _retry_instant_flush(self) -> None:
+        """Wait 60 seconds then retry flushing instant lane."""
         try:
             await asyncio.sleep(60)
-            logger.info("Retrying escalation flush...")
-            await self._flush_escalations()
+            logger.info("Retrying instant lane flush...")
+            await self._flush_instant_lane()
         except asyncio.CancelledError:
-            logger.debug("Escalation retry cancelled")
+            logger.debug("Instant retry cancelled")
+
+    # --- Sitrep Review (called on schedule, not on observation arrival) ---
+
+    async def _run_sitrep_review(self) -> None:
+        """
+        Run a consolidated sitrep review.
+
+        Called every 30 minutes by the scheduler. Builds a sitrep prompt
+        with all buffered observations, notification ledger, ongoing
+        conditions, and time context. POSTs to Doris for editorial review.
+        """
+        if not self._sitrep.should_review():
+            logger.debug("Sitrep review skipped — no buffered observations")
+            return
+
+        logger.info(f"Starting sitrep review ({self._sitrep.buffer_count} observations)")
+
+        # Budget check (sitrep reviews are ~20k tokens)
+        try:
+            from llm.token_budget import check_budget, BudgetExceeded
+            check_budget(20_000)
+        except BudgetExceeded as e:
+            logger.warning(f"Skipping sitrep review — {e}. "
+                           f"Buffer retained ({self._sitrep.buffer_count} items).")
+            return
+        except Exception:
+            pass
+
+        sitrep_prompt = self._sitrep.build_sitrep()
+        review_error = None
+        decisions = []
+        conditions = []
+        summary = ""
+        notifications_sent = 0
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=90)  # Longer timeout for review
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    self._doris_url,
+                    headers=self._auth_headers,
+                    json={"message": sitrep_prompt, "daemon": True, "wake_reason": "sitrep_review"}
+                ) as resp:
+                    resp_text = await resp.text()
+
+                    if resp.status >= 400:
+                        logger.error(f"Sitrep review failed (HTTP {resp.status}): {resp_text[:200]}")
+                        review_error = f"HTTP {resp.status}"
+                    else:
+                        logger.info(f"Sitrep review response ({resp.status}): {resp_text[:200]}")
+
+                        # Parse the response for structured data
+                        try:
+                            resp_data = json.loads(resp_text)
+                            claude_text = resp_data.get("response", "")
+                            tools_called = resp_data.get("tools_called", [])
+
+                            # Extract JSON decisions from Claude's response
+                            parsed = self._parse_sitrep_response(claude_text)
+                            decisions = parsed.get("decisions", [])
+                            conditions = parsed.get("conditions", [])
+                            summary = parsed.get("summary", "")
+
+                            # Record notifications from tool call metadata
+                            notify_calls = [t for t in tools_called if t.get("name") == "notify_user"]
+                            for call in notify_calls:
+                                args = call.get("args", {})
+                                self._sitrep.record_notification(LedgerEntry(
+                                    timestamp=datetime.now().isoformat(),
+                                    scout="sitrep_review",
+                                    summary=args.get("message", args.get("action", "notification"))[:200],
+                                    priority=args.get("priority", "proactive"),
+                                ))
+                                notifications_sent += 1
+
+                            # Fallback: if no tool metadata, check decisions for NOTIFY
+                            if not notify_calls:
+                                for d in decisions:
+                                    if d.get("action") == "NOTIFY":
+                                        notifications_sent += 1
+
+                            # Update conditions from Doris's response
+                            if conditions:
+                                self._sitrep.update_conditions(conditions)
+
+                            # Store review summary for next time
+                            if summary:
+                                self._sitrep.record_review_summary(summary)
+
+                        except (json.JSONDecodeError, KeyError) as e:
+                            logger.warning(f"Failed to parse sitrep response: {e}")
+
+        except Exception as e:
+            logger.error(f"Sitrep review failed: {e}")
+            review_error = str(e)
+
+        # Log the review
+        obs_count = self._sitrep.buffer_count
+        scout_count = len(set(obs.scout for obs in self._sitrep._buffer))
+        self._sitrep.log_review(ReviewLogEntry(
+            timestamp=datetime.now().isoformat(),
+            observation_count=obs_count,
+            scout_count=scout_count,
+            decisions=decisions,
+            conditions=conditions,
+            summary=summary,
+            notifications_sent=notifications_sent,
+            error=review_error,
+        ))
+
+        # Clear buffer on success (Doris has reviewed everything)
+        if review_error is None:
+            cleared = self._sitrep.clear_buffer()
+            logger.info(f"Sitrep review complete: {len(cleared)} observations reviewed, "
+                        f"{notifications_sent} notifications sent")
+        else:
+            logger.warning(f"Sitrep review had errors — buffer retained "
+                           f"({self._sitrep.buffer_count} items)")
+
+    @staticmethod
+    def _parse_sitrep_response(text: str) -> dict:
+        """
+        Extract JSON from Doris's sitrep review response.
+
+        Doris responds with JSON followed by tool calls. The JSON may be
+        embedded in markdown code blocks or mixed with prose.
+        """
+        import re
+
+        # Try markdown code block first
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # Try bare JSON object
+        json_match = re.search(r'(\{"decisions".*\})', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        return {"decisions": [], "conditions": [], "summary": ""}
 
     async def _handle_wake(self, reason: str, prompt: str) -> None:
         """
@@ -586,13 +552,12 @@ class DorisDaemon:
         except Exception as e:
             logger.error(f"Failed to check device tokens: {e}")
 
-        # Flush any escalations persisted from a previous run
-        if self._escalation_buffer:
-            logger.info(f"Flushing {len(self._escalation_buffer)} escalations persisted from previous run...")
-            try:
-                await self._flush_escalations()
-            except Exception as e:
-                logger.error(f"Failed to flush persisted escalations: {e}")
+        # Log sitrep state from previous run (if any)
+        if self._sitrep.buffer_count > 0:
+            logger.info(f"Sitrep buffer has {self._sitrep.buffer_count} observations from previous run")
+        ledger_count = len(self._sitrep._ledger)
+        if ledger_count > 0:
+            logger.info(f"Notification ledger has {ledger_count} entries")
 
         # Run scouts immediately on startup
         logger.info("Running initial scout sweep...")

@@ -366,6 +366,7 @@ class ChatResponse(BaseModel):
     response: str
     source: str
     latency_ms: int
+    tools_called: list[dict] = []
 
 @app.get("/status")
 async def consolidated_status(_token: str = Depends(verify_token)):
@@ -1326,20 +1327,23 @@ async def chat_text(request: ChatRequest, _token: str = Depends(verify_token)):
             response = claude_response.text
             tokens_input = claude_response.input_tokens
             tokens_output = claude_response.output_tokens
+            tools_called = claude_response.tools_called
         else:
             response = str(claude_response)
+            tools_called = []
 
     except Exception as e:
         success = False
         error_msg = str(e)
         response = "Sorry, something went wrong processing your message."
+        tools_called = []
         import logging
         logging.getLogger("doris.api").exception("Chat error")
 
     latency_ms = int((time.time() - start) * 1000)
 
     print(f"[API:{request_id}] Response ({latency_ms}ms): {response[:50]}...")
-    return ChatResponse(response=response, source="claude", latency_ms=latency_ms)
+    return ChatResponse(response=response, source="claude", latency_ms=latency_ms, tools_called=tools_called)
 
 
 @app.post("/chat/stream")
