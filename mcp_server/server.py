@@ -1044,7 +1044,7 @@ def doris_wisdom_search(
 
     try:
         if action_type:
-            results = get_relevant_wisdom(action_type=action_type, limit=limit)
+            results = get_relevant_wisdom(action_type=action_type, limit=limit, include_unrated=True)
         elif query:
             results = _search_wisdom(query=query, limit=limit)
         else:
