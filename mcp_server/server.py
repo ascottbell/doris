@@ -10,6 +10,9 @@ Tools:
 - doris_memory_log: Log conversation for fact extraction
 - doris_memory_facts: Get facts by category (fast, no embedding)
 - doris_memory_forget: Delete memories
+- doris_graph_*: Knowledge graph entity/relationship CRUD
+- doris_wisdom_log/outcome/search/feedback: Experiential learning system
+- doris_extract: Entity/relationship extraction from text
 
 Run modes:
 - STDIO (local):  python -m mcp_server.server
@@ -208,7 +211,7 @@ def doris_memory_query(
     limit: int = 10,
     category: Optional[str] = None,
     use_semantic: bool = True,
-    min_relevance: float = 0.5
+    min_relevance: float = 0.3
 ) -> dict:
     """
     Search memories using semantic or keyword search.
@@ -220,7 +223,7 @@ def doris_memory_query(
         limit: Maximum number of results (default 10)
         category: Optional filter by category (identity, family, preference, project, decision, etc.)
         use_semantic: If True, use embedding-based search. If False, use keyword search.
-        min_relevance: Minimum cosine similarity (0-1) for semantic results. Default 0.5 filters noise.
+        min_relevance: Minimum cosine similarity (0-1) for semantic results. Default 0.3 passes most results; tighten to 0.5+ to filter noise.
 
     Returns:
         List of matching memories with content, category, subject, and relevance score.
@@ -932,7 +935,221 @@ def doris_graph_relationship_update(
 
 
 # ============================================================================
-# FACT EXTRACTION
+# WISDOM TOOLS (Experiential Learning)
+# ============================================================================
+
+@mcp.tool()
+def doris_wisdom_log(
+    action_type: str,
+    reasoning: str,
+    action_data: Optional[dict] = None,
+    trigger: Optional[str] = None,
+    context: Optional[str] = None,
+    tags: Optional[list[str]] = None
+) -> dict:
+    """
+    Log reasoning before taking an action. Creates a wisdom entry for future learning.
+
+    Use this when making a significant decision — the reasoning and outcome
+    can inform future similar decisions.
+
+    Args:
+        action_type: Type of action (e.g., "architecture_decision", "tool_selection",
+            "debugging_approach", "code_refactor", "config_change")
+        reasoning: Why this action was chosen — the thought process
+        action_data: Optional structured data about the action
+        trigger: What prompted this action (e.g., "user_request", "error_encountered")
+        context: Additional context (project, file, etc.)
+        tags: Optional tags for categorization
+
+    Returns:
+        Wisdom entry ID for recording outcome later
+    """
+    if len(reasoning) > MAX_CONTENT_LENGTH:
+        return {"status": "error", "message": f"reasoning too long: {len(reasoning)} chars (max {MAX_CONTENT_LENGTH})"}
+    if context and len(context) > MAX_CONTENT_LENGTH:
+        return {"status": "error", "message": f"context too long: {len(context)} chars (max {MAX_CONTENT_LENGTH})"}
+
+    from memory.wisdom import log_reasoning as _log_reasoning
+    try:
+        wisdom_id = _log_reasoning(
+            action_type=action_type,
+            reasoning=reasoning,
+            action_data=action_data,
+            trigger=trigger,
+            context=context,
+            tags=tags,
+        )
+        return {"status": "logged", "wisdom_id": wisdom_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+def doris_wisdom_outcome(
+    wisdom_id: str,
+    outcome: str,
+    details: Optional[str] = None
+) -> dict:
+    """
+    Record the outcome of a previously logged action.
+
+    Call this after an action completes to close the feedback loop.
+
+    Args:
+        wisdom_id: ID from doris_wisdom_log
+        outcome: "success" or "failure"
+        details: What happened — especially useful for failures
+
+    Returns:
+        Status of the update
+    """
+    if outcome not in ("success", "failure"):
+        return {"status": "error", "message": f"outcome must be 'success' or 'failure', got {outcome!r}"}
+
+    from memory.wisdom import record_outcome as _record_outcome
+    try:
+        success = _record_outcome(wisdom_id, outcome=outcome, details=details)
+        if success:
+            return {"status": "recorded", "wisdom_id": wisdom_id, "outcome": outcome}
+        return {"status": "not_found", "wisdom_id": wisdom_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+def doris_wisdom_search(
+    query: Optional[str] = None,
+    action_type: Optional[str] = None,
+    limit: int = 10
+) -> dict:
+    """
+    Search past wisdom entries — learn from previous decisions and outcomes.
+
+    Use this before making a similar decision to see what worked/failed before.
+
+    Args:
+        query: Free-text search across reasoning and context
+        action_type: Filter by action type (e.g., "architecture_decision")
+        limit: Maximum results (default 10)
+
+    Returns:
+        List of wisdom entries with reasoning, outcomes, and feedback scores
+    """
+    limit = _clamp_limit(limit)
+    if query and len(query) > MAX_QUERY_LENGTH:
+        return {"status": "error", "message": f"query too long: {len(query)} chars (max {MAX_QUERY_LENGTH})"}
+
+    from memory.wisdom import search_wisdom as _search_wisdom, get_relevant_wisdom
+
+    try:
+        if action_type:
+            results = get_relevant_wisdom(action_type=action_type, limit=limit)
+        elif query:
+            results = _search_wisdom(query=query, limit=limit)
+        else:
+            from memory.wisdom import get_recent_wisdom
+            results = get_recent_wisdom(limit=limit)
+
+        # Convert WisdomEntry objects to dicts if needed
+        entries = []
+        for r in results:
+            if hasattr(r, '__dict__'):
+                entry = {k: v for k, v in r.__dict__.items() if not k.startswith('_')}
+            elif isinstance(r, dict):
+                entry = r
+            else:
+                entry = dict(r)
+            entries.append(entry)
+
+        return {
+            "query": query,
+            "action_type": action_type,
+            "count": len(entries),
+            "entries": entries
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@mcp.tool()
+def doris_wisdom_feedback(
+    wisdom_id: str,
+    score: int,
+    notes: Optional[str] = None
+) -> dict:
+    """
+    Add feedback to a wisdom entry (1-5 rating).
+
+    Use this to rate whether a past decision was good or bad.
+    This data trains the system to make better decisions over time.
+
+    Args:
+        wisdom_id: ID of the wisdom entry
+        score: Rating from 1 (terrible) to 5 (excellent)
+        notes: Optional explanation of the rating
+
+    Returns:
+        Status of the feedback
+    """
+    if not (1 <= score <= 5):
+        return {"status": "error", "message": f"score must be 1-5, got {score}"}
+
+    from memory.wisdom import add_feedback as _add_feedback
+    try:
+        success = _add_feedback(wisdom_id, score=score, notes=notes)
+        if success:
+            return {"status": "recorded", "wisdom_id": wisdom_id, "score": score}
+        return {"status": "not_found", "wisdom_id": wisdom_id}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ============================================================================
+# EXTRACTION TOOL
+# ============================================================================
+
+@mcp.tool()
+def doris_extract(
+    text: str,
+    source: Optional[str] = None
+) -> dict:
+    """
+    Extract entities and relationships from text and add them to the knowledge graph.
+
+    Use this to explicitly build the knowledge graph from conversation summaries,
+    meeting notes, or any text containing facts about people, places, and projects.
+
+    This runs synchronously (1-3 seconds via Claude Haiku) and returns what was created.
+
+    Args:
+        text: Text to extract entities and relationships from (max 4000 chars)
+        source: Optional source label (default: "mcp-extract")
+
+    Returns:
+        Created entities and relationships, or errors
+    """
+    if not text or not text.strip():
+        return {"status": "error", "message": "Text is required"}
+    if len(text) > MAX_CONVERSATION_LENGTH:
+        return {"status": "error", "message": f"Text too long: {len(text)} chars (max {MAX_CONVERSATION_LENGTH})"}
+
+    src = source or "mcp-extract"
+    try:
+        extraction = extract_graph_from_conversation(text, source=src)
+        if not extraction.get("entities") and not extraction.get("relationships"):
+            return {
+                "status": "empty",
+                "message": "No entities or relationships found in text"
+            }
+        result = process_graph_extraction(extraction, source=src)
+        return {"status": "success", **result}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ============================================================================
+# INTERNAL FACT EXTRACTION (deprecated helpers)
 # ============================================================================
 
 def extract_facts_from_conversation(conversation: str) -> list[dict]:
