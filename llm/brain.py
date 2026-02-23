@@ -52,6 +52,46 @@ from session import get_session
 logger = logging.getLogger(__name__)
 
 
+# --- Wisdom Summary ---
+
+_wisdom_summary_cache: str = None
+_wisdom_cache_time: float = 0
+WISDOM_CACHE_TTL = 600  # 10 minutes (recompiles rarely)
+
+WISDOM_SUMMARY_PATH = Path(__file__).parent.parent / "data" / "wisdom_summary.md"
+
+
+def _load_wisdom_summary() -> str:
+    """
+    Load compiled wisdom summary from disk, with caching.
+
+    Returns empty string if no summary exists yet.
+    """
+    global _wisdom_summary_cache, _wisdom_cache_time
+
+    now = time.time()
+    if _wisdom_summary_cache is not None and (now - _wisdom_cache_time) < WISDOM_CACHE_TTL:
+        return _wisdom_summary_cache
+
+    try:
+        if WISDOM_SUMMARY_PATH.exists():
+            content = WISDOM_SUMMARY_PATH.read_text().strip()
+            # Strip the HTML comment metadata header
+            if content.startswith("<!--"):
+                newline_idx = content.find("\n")
+                if newline_idx > 0:
+                    content = content[newline_idx:].strip()
+            _wisdom_summary_cache = content
+        else:
+            _wisdom_summary_cache = ""
+    except OSError as e:
+        logger.warning(f"Failed to load wisdom summary: {e}")
+        _wisdom_summary_cache = ""
+
+    _wisdom_cache_time = now
+    return _wisdom_summary_cache
+
+
 # --- Graph-Based Identity ---
 
 _family_section_cache: str = None
@@ -409,9 +449,15 @@ def get_system_prompt(location: dict = None, speaker: str = None) -> str:
     else:
         dynamic_context += "\n\n## Current Speaker\nSpeaker not identified. Assume it's the primary user unless context suggests otherwise."
 
-    # Assemble: WORM (with markers) + Dynamic Context
+    # === WISDOM LAYER (learned experience, evolves slowly) ===
+    wisdom_summary = _load_wisdom_summary()
+
+    # Assemble: WORM (with markers) + Wisdom + Dynamic Context
     # The markers allow compaction engine to identify and preserve WORM content
-    prompt = f"{WORM_START_MARKER}\n{worm_persona}\n{WORM_END_MARKER}\n\n{dynamic_context}"
+    prompt = f"{WORM_START_MARKER}\n{worm_persona}\n{WORM_END_MARKER}"
+    if wisdom_summary:
+        prompt += f"\n\n## Learned Wisdom\nThis is your compiled understanding of the user's preferences and patterns, distilled from real decisions and feedback. If the user asks what you've learned about them, answer from this. This is NOT part of your immutable identity — it evolves as you learn.\n\n{wisdom_summary}"
+    prompt += f"\n\n{dynamic_context}"
 
     return prompt
 
@@ -435,7 +481,11 @@ def get_system_prompt_cached(location: dict = None, speaker: str = None) -> list
     # === STATIC BLOCK (cacheable — identical across requests) ===
     worm_persona = get_worm_persona()
     family_section = get_family_section_from_graph()
-    static_text = f"{WORM_START_MARKER}\n{worm_persona}\n{WORM_END_MARKER}\n\n{family_section}"
+    wisdom_summary = _load_wisdom_summary()
+    static_text = f"{WORM_START_MARKER}\n{worm_persona}\n{WORM_END_MARKER}"
+    if wisdom_summary:
+        static_text += f"\n\n## Learned Wisdom\nThis is your compiled understanding of the user's preferences and patterns, distilled from real decisions and feedback. If the user asks what you've learned about them, answer from this. This is NOT part of your immutable identity — it evolves as you learn.\n\n{wisdom_summary}"
+    static_text += f"\n\n{family_section}"
 
     # === DYNAMIC BLOCK (changes per request — NOT cached) ===
     dynamic_text = (

@@ -41,4 +41,14 @@ ACTION_FAMILIES = {
     "notifications": ["notify_user"],
     "creative": ["create_note"],
     "escalation": ["email_escalation_miss", "email_escalation_correct", "calendar_escalation_miss"],
+    "development": [
+        "architecture_decision",
+        "debugging_resolution",
+        "dependency_choice",
+        "config_change",
+        "gotcha",
+        "user_preference",
+        "approach_validated",
+        "approach_rejected",
+    ],
 }

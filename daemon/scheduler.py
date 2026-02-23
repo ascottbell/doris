@@ -235,6 +235,14 @@ class DorisScheduler:
             name="Email Patterns (daily 3:30 AM)",
         )
 
+        # Wisdom compilation — check every 2 hours, compiles only when 5+ new entries
+        self.scheduler.add_job(
+            self._run_wisdom_compilation,
+            IntervalTrigger(hours=2),
+            id="wisdom_compilation",
+            name="Wisdom Compilation (2 hours)",
+        )
+
         logger.info("Scheduled jobs configured")
 
     async def _run_scout(self, scout) -> None:
@@ -309,6 +317,27 @@ class DorisScheduler:
             logger.info(f"Pattern analysis complete: {pattern_type}")
         except Exception as e:
             logger.error(f"Pattern analysis failed ({pattern_type}): {e}")
+
+    async def _run_wisdom_compilation(self) -> None:
+        """Check for new wisdom entries and compile summary if threshold is met."""
+        try:
+            from memory.wisdom_compiler import check_and_compile
+            summary = await check_and_compile()
+            if summary:
+                logger.info("Wisdom summary recompiled successfully")
+                # Notify via escalation callback
+                if self.on_escalation:
+                    from scouts.base import Observation, Relevance
+                    notification = Observation(
+                        scout="wisdom_compiler",
+                        timestamp=datetime.now(),
+                        observation=f"Wisdom summary recompiled with new learnings:\n\n{summary[:1000]}",
+                        relevance=Relevance.HIGH,
+                        escalate=True,
+                    )
+                    await self.on_escalation([notification])
+        except Exception as e:
+            logger.error(f"Wisdom compilation failed: {e}")
 
     def _update_heartbeat(self) -> None:
         """Update heartbeat timestamp to indicate daemon is alive."""

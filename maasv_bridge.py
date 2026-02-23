@@ -111,6 +111,27 @@ def init_maasv():
             "Railway": "technology",
             "PostgreSQL": "technology",
         },
+        # Action families for wisdom "similar enough" matching
+        action_families={
+            "calendar": ["create_calendar_event", "move_calendar_event", "delete_calendar_event"],
+            "reminders": ["create_reminder", "complete_reminder"],
+            "messaging": ["send_imessage", "send_email"],
+            "home": ["control_music"],
+            "memory": ["store_memory"],
+            "notifications": ["notify_user"],
+            "creative": ["create_note"],
+            "escalation": ["email_escalation_miss", "email_escalation_correct", "calendar_escalation_miss"],
+            "development": [
+                "architecture_decision",
+                "debugging_resolution",
+                "dependency_choice",
+                "config_change",
+                "gotcha",
+                "user_preference",
+                "approach_validated",
+                "approach_rejected",
+            ],
+        },
         # Cross-encoder reranking (Doris has torch installed)
         cross_encoder_enabled=True,
         # Hygiene log
