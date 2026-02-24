@@ -147,6 +147,21 @@ def _check_health(service: str, timeout: int = 5) -> tuple[bool, str]:
         return False, f"Health check failed: {str(e)}"
 
 
+def _wait_for_port_free(port: int = 8000, timeout: int = 15) -> bool:
+    """Wait until a port is free (no process listening on it)."""
+    for _ in range(timeout):
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return True
+        time.sleep(1)
+    return False
+
+
 def control_service(service: str, action: str) -> dict:
     """
     Control a Doris service.
@@ -220,12 +235,19 @@ def control_service(service: str, action: str) -> dict:
         if not success:
             # Fallback: stop then start
             _run_launchctl("stop", label)
-            time.sleep(1)
+
+            # For the server, wait for port 8000 to be free
+            if service == "server":
+                _wait_for_port_free(8000, timeout=15)
+            else:
+                time.sleep(3)
+
             success, msg = _run_launchctl("start", label)
 
         if success:
-            # Wait and verify
-            time.sleep(3)
+            # Wait for startup — server needs more time due to init steps
+            wait_time = 5 if service == "server" else 3
+            time.sleep(wait_time)
             healthy, health_msg = _check_health(service)
             if healthy:
                 return {
