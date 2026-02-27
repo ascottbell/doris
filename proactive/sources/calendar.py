@@ -7,10 +7,11 @@ Checks for:
 - Important events this week
 """
 
+import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from tools.cal import list_events, get_todays_events
+from services_config import is_service_enabled
 from proactive.models import ProactiveEvent
 from proactive.db import (
     save_event,
@@ -44,6 +45,9 @@ TRAVEL_TIMES = {
 }
 
 
+logger = logging.getLogger(__name__)
+
+
 def monitor():
     """
     Main calendar monitor function.
@@ -52,29 +56,37 @@ def monitor():
     1. Events starting in the next 2 hours (travel alerts)
     2. Events tomorrow (prep reminders)
     """
+    # Check if calendar service is enabled on this platform
+    if not is_service_enabled("calendar"):
+        logger.debug("[calendar-monitor] Calendar service not configured, skipping")
+        return
+
     print("[calendar-monitor] Checking upcoming events...")
+
+    # Lazy import to avoid errors when calendar CLI is missing
+    from tools.cal import list_events
 
     now = datetime.now(EASTERN)
 
     try:
         # Check 1: Events in next 2 hours (travel time alerts)
-        _check_upcoming_events(now)
+        _check_upcoming_events(now, list_events)
 
         # Check 2: Tomorrow's events (evening prep reminder)
         # Only run this check between 6-9 PM
         if 18 <= now.hour <= 21:
-            _check_tomorrow_events(now)
+            _check_tomorrow_events(now, list_events)
 
         update_checkpoint("calendar")
         print("[calendar-monitor] Done")
 
+    except FileNotFoundError as e:
+        logger.warning(f"[calendar-monitor] Calendar tool not available: {e}")
     except Exception as e:
-        print(f"[calendar-monitor] Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"[calendar-monitor] Error: {e}")
 
 
-def _check_upcoming_events(now: datetime):
+def _check_upcoming_events(now: datetime, list_events=None):
     """Check for events in the next 2 hours that need travel alerts."""
     window_start = now
     window_end = now + timedelta(hours=2)
@@ -159,7 +171,7 @@ def _check_upcoming_events(now: datetime):
                 notify_action(action)  # Push notification, voice optional
 
 
-def _check_tomorrow_events(now: datetime):
+def _check_tomorrow_events(now: datetime, list_events=None):
     """Check tomorrow's events and alert about important ones."""
     tomorrow = now + timedelta(days=1)
     tomorrow_start = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)

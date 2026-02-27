@@ -49,6 +49,7 @@ from scouts import (
 )
 from daemon.digest import get_digest, save_digest
 from daemon.scout_health import get_health_tracker
+from services_config import is_service_enabled
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -84,16 +85,16 @@ class DorisScheduler:
         self.on_wake = on_wake
         self.on_sitrep_review = on_sitrep_review
 
-        # Scout instances
+        # Scout instances (platform-gated scouts are None when their service is unavailable)
         self.email_scout = EmailScout()
-        self.calendar_scout = CalendarScout()
+        self.calendar_scout = CalendarScout() if is_service_enabled("calendar") else None
         self.weather_scout = WeatherScout()
         self.time_scout = TimeScout()
         self.health_scout = HealthScout()
         self.location_scout = LocationScout()
         self.memory_scout = MemoryScout()
         self.system_scout = SystemScout()
-        self.reminders_scout = RemindersScout()
+        self.reminders_scout = RemindersScout() if is_service_enabled("reminders") else None
 
         # Track state
         self._running = False
@@ -110,13 +111,14 @@ class DorisScheduler:
             name="Email Scout (30 min)",
         )
 
-        self.scheduler.add_job(
-            self._run_scout,
-            IntervalTrigger(hours=1),
-            args=[self.calendar_scout],
-            id="calendar_scout",
-            name="Calendar Scout (1 hour)",
-        )
+        if self.calendar_scout:
+            self.scheduler.add_job(
+                self._run_scout,
+                IntervalTrigger(hours=1),
+                args=[self.calendar_scout],
+                id="calendar_scout",
+                name="Calendar Scout (1 hour)",
+            )
 
         self.scheduler.add_job(
             self._run_scout,
@@ -194,13 +196,14 @@ class DorisScheduler:
         )
 
         # Reminders scout (every 15 min - due/overdue reminders)
-        self.scheduler.add_job(
-            self._run_scout,
-            IntervalTrigger(minutes=15),
-            args=[self.reminders_scout],
-            id="reminders_scout",
-            name="Reminders Scout (15 min)",
-        )
+        if self.reminders_scout:
+            self.scheduler.add_job(
+                self._run_scout,
+                IntervalTrigger(minutes=15),
+                args=[self.reminders_scout],
+                id="reminders_scout",
+                name="Reminders Scout (15 min)",
+            )
 
         # Sitrep review — consolidated observation review every 30 minutes
         self.scheduler.add_job(
@@ -480,10 +483,14 @@ Please:
         """Run all scouts immediately (for testing/manual trigger)."""
         all_observations = []
 
-        for scout in [self.email_scout, self.calendar_scout,
+        all_scouts = [self.email_scout, self.calendar_scout,
                       self.weather_scout, self.time_scout,
                       self.health_scout, self.location_scout,
-                      self.memory_scout, self.system_scout, self.reminders_scout]:
+                      self.memory_scout, self.system_scout, self.reminders_scout]
+
+        for scout in all_scouts:
+            if scout is None:
+                continue
             try:
                 observations = await scout.run()
                 all_observations.extend(observations)

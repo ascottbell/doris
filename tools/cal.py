@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import json
 import re
@@ -6,7 +7,22 @@ from pathlib import Path
 
 from security.sanitize import sanitize_subprocess_arg, validate_id
 
+logger = logging.getLogger(__name__)
+
 CALENDAR_CLI = Path.home() / "Projects/doris-calendar/.build/release/doris-calendar"
+
+# Cache for calendar CLI availability
+_calendar_available = None
+
+
+def _check_calendar_available() -> bool:
+    """Check if the calendar CLI is available."""
+    global _calendar_available
+    if _calendar_available is None:
+        _calendar_available = CALENDAR_CLI.exists()
+        if not _calendar_available:
+            logger.warning(f"Calendar CLI not found at {CALENDAR_CLI}. Calendar features disabled.")
+    return _calendar_available
 
 # Hidden marker for Doris-created events (appended to notes field)
 # Format: [doris:source:timestamp] where source is voice|email|scout|api
@@ -61,6 +77,9 @@ def list_events(start: dt = None, end: dt = None, include_creator: bool = True) 
     If include_creator is True (default), adds 'created_by' field to events
     that were created by Doris, and strips the internal marker from notes.
     """
+    if not _check_calendar_available():
+        raise FileNotFoundError(f"Calendar CLI not found at {CALENDAR_CLI}")
+
     from zoneinfo import ZoneInfo
     local_tz = ZoneInfo("America/New_York")
 

@@ -1,0 +1,45 @@
+# Doris Services Configuration
+#
+# Each category maps to one or more backends. Backends are filtered by platform
+# at load time — macOS-only types are skipped on Linux and vice versa.
+#
+# Supported types:
+#   macosx     — macOS-only (AppleScript, native frameworks)
+#   linux      — Linux-only
+#   systemd    — Linux with systemd
+#   supervisor — Linux with supervisor
+#   docker     — Docker containers only
+#   google     — Cross-platform (Google APIs)
+#   brave      — Cross-platform (Brave browser)
+#
+# To disable a service entirely, set it to false:
+#   calendar: false
+
+# --- macOS-only services (auto-skipped on Linux) ---
+calendar:
+  type: macosx
+
+reminders:
+  type: macosx
+
+messaging:
+  type: macosx
+
+contacts:
+  type: macosx
+
+notes:
+  type: macosx
+
+music:
+  type: macosx
+
+shortcuts:
+  type: macosx
+
+# --- Cross-platform services ---
+browser:
+  type: brave
+
+system:
+  type: linux
