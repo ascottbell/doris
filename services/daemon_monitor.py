@@ -175,7 +175,8 @@ class DaemonMonitor:
             else:
                 # Try stop then start
                 subprocess.run(["launchctl", "stop", DAEMON_LABEL], timeout=5)
-                await asyncio.sleep(1)
+                import time
+                time.sleep(1)
                 subprocess.run(["launchctl", "start", DAEMON_LABEL], timeout=5)
                 logger.info("Daemon restarted via stop/start")
                 return True
