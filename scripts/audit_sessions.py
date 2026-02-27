@@ -5,8 +5,13 @@ Audit Claude Code sessions from Jan 13-24 to extract facts that should have been
 
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
+
+# Ensure project root is in path for config imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import settings
 
 SESSION_DIR = Path(os.environ.get(
     "CLAUDE_SESSION_DIR",
@@ -106,7 +111,7 @@ def main():
             print(f"  Files modified: {len(summary['files_modified'])}")
 
     # Save full audit
-    output_path = Path(__file__).parent.parent / "data" / "session_audit.json"
+    output_path = settings.data_dir / "session_audit.json"
     with open(output_path, "w") as f:
         json.dump(all_summaries, f, indent=2)
 

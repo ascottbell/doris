@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from security.file_io import atomic_json_write, locked_json_read, locked_json_update
+from config import settings
 
 logger = logging.getLogger("doris.token_budget")
 
@@ -33,7 +34,7 @@ DAILY_BUDGET = 8_000_000    # ~$24/day at Opus pricing
 
 SOFT_LIMIT_PCT = 0.80  # Warn at 80%
 
-STATE_FILE = Path(__file__).parent.parent / "data" / "token_budget_state.json"
+STATE_FILE = settings.data_dir / "token_budget_state.json"
 
 
 class BudgetExceeded(Exception):

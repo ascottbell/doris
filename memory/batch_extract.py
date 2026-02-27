@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from memory.store import store_memory
 from security.prompt_safety import wrap_with_scan
 from security.crypto import get_fernet
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ Conversation:
 
 
 class BatchExtractor:
-    def __init__(self, checkpoint_path: str = "data/extraction_checkpoint.json"):
+    def __init__(self, checkpoint_path: str = str(settings.data_dir / "extraction_checkpoint.json")):
         self.checkpoint_path = Path(checkpoint_path)
         self.checkpoint = self._load_checkpoint()
         self.stats = {"processed": 0, "facts": 0, "errors": 0, "skipped": 0}

@@ -145,7 +145,7 @@ def get_active_tokens() -> list[tuple[str, str]]:
         print(f"[push] SQLite token lookup failed: {e}")
 
     # Also check JSON file (main.py stores tokens there)
-    json_tokens_path = Path(__file__).parent.parent / "data" / "device_tokens.json"
+    json_tokens_path = settings.data_dir / "device_tokens.json"
     if json_tokens_path.exists():
         try:
             with open(json_tokens_path) as f:

@@ -17,10 +17,11 @@ import json
 from pathlib import Path
 
 from scouts.base import Observation, Relevance
+from config import settings
 
 
 # Persistence file for digest state
-DIGEST_FILE = Path(__file__).parent.parent / "data" / "awareness_digest.json"
+DIGEST_FILE = settings.data_dir / "awareness_digest.json"
 
 # Safety limits for digest files loaded from disk
 MAX_DIGEST_FILE_SIZE = 5 * 1024 * 1024  # 5 MB

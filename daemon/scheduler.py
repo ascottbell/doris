@@ -28,9 +28,10 @@ from typing import Callable, Optional
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from config import settings
 
 # State file for heartbeat updates
-STATE_FILE = Path(__file__).parent.parent / "data" / "daemon_state.json"
+STATE_FILE = settings.data_dir / "daemon_state.json"
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 

@@ -12,10 +12,11 @@ from pathlib import Path
 from typing import Optional
 
 from security.file_io import atomic_json_write, locked_json_read
+from config import settings
 
 logger = logging.getLogger("doris.daemon.health")
 
-HEALTH_FILE = Path(__file__).parent.parent / "data" / "scout_health.json"
+HEALTH_FILE = settings.data_dir / "scout_health.json"
 
 
 class ScoutHealthTracker:

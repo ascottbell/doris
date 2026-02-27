@@ -48,7 +48,7 @@ logging.basicConfig(
 logger = logging.getLogger("doris.daemon")
 
 # State file for tracking daemon status
-STATE_FILE = PROJECT_ROOT / "data" / "daemon_state.json"
+STATE_FILE = settings.data_dir / "daemon_state.json"
 
 
 class DorisDaemon:

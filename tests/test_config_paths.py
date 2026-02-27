@@ -74,3 +74,29 @@ def test_db_modules_use_settings_data_dir(monkeypatch, tmp_path):
     import tools.documents
     importlib.reload(tools.documents)
     assert tools.documents.CACHE_DB_PATH == tmp_path / "document_cache.db"
+
+
+def test_state_modules_use_settings_data_dir(monkeypatch, tmp_path):
+    """State file constants should derive from settings.data_dir."""
+    monkeypatch.setenv("DORIS_DATA_DIR", str(tmp_path))
+
+    import importlib
+    import sys
+    import types
+    import config
+    importlib.reload(config)
+
+    # Stub the daemon package to avoid its __init__.py import chain
+    # (which pulls in scouts -> google, unavailable in test env).
+    if "daemon" not in sys.modules or hasattr(sys.modules["daemon"], "__all__"):
+        stub = types.ModuleType("daemon")
+        stub.__path__ = [str(Path(__file__).parent.parent / "daemon")]
+        monkeypatch.setitem(sys.modules, "daemon", stub)
+
+    import daemon.scout_health
+    importlib.reload(daemon.scout_health)
+    assert daemon.scout_health.HEALTH_FILE == tmp_path / "scout_health.json"
+
+    import llm.token_budget
+    importlib.reload(llm.token_budget)
+    assert llm.token_budget.STATE_FILE == tmp_path / "token_budget_state.json"

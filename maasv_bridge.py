@@ -89,7 +89,7 @@ def init_maasv():
         inference_model=resolve_model("utility"),
         review_model=resolve_model("utility"),
         # Hygiene
-        backup_dir=Path(__file__).parent / "data" / "backups",
+        backup_dir=settings.data_dir / "backups",
         max_hygiene_backups=int(os.environ.get("DORIS_MAX_HYGIENE_BACKUPS", "3")),
         protected_categories={"identity", "family"},
         protected_subjects=set(),  # Configure with your protected family member names
@@ -135,7 +135,7 @@ def init_maasv():
         # Cross-encoder reranking (Doris has torch installed)
         cross_encoder_enabled=True,
         # Hygiene log
-        hygiene_log_path=Path(__file__).parent / "data" / "memory_hygiene_log.json",
+        hygiene_log_path=settings.data_dir / "memory_hygiene_log.json",
     )
 
     maasv.init(
