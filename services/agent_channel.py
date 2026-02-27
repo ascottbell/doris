@@ -20,7 +20,6 @@ import sqlite3
 import time
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel
 
@@ -67,12 +66,12 @@ class StoredMessage(BaseModel):
 
 
 # Database setup
-DB_PATH = Path(__file__).parent.parent / "data" / "agent_channel.db"
+from config import settings
+DB_PATH = settings.data_dir / "agent_channel.db"
 
 
 def _get_hmac_key() -> Optional[bytes]:
     """Get HMAC signing key from DORIS_API_TOKEN (first token if comma-separated)."""
-    from config import settings
     token = settings.doris_api_token
     if not token:
         return None

@@ -34,7 +34,8 @@ def _get_langextract():
 
 
 # Database path for extraction cache
-CACHE_DB_PATH = Path(__file__).parent.parent / "data" / "document_cache.db"
+from config import settings
+CACHE_DB_PATH = settings.data_dir / "document_cache.db"
 
 # Directories to search for documents — configure for your system
 SEARCH_DIRECTORIES = [

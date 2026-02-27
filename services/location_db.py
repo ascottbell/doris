@@ -7,11 +7,12 @@ Stores location history from iOS app and provides location-aware context for Dor
 import sqlite3
 import json
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 from math import radians, sin, cos, sqrt, atan2
 
-DB_PATH = Path(__file__).parent.parent / "data" / "doris.db"
+from config import settings
+
+DB_PATH = settings.data_dir / "doris.db"
 
 # Known locations (for context)
 # NOTE: Configure your own known locations here or via add_known_location().

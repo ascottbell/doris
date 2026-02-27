@@ -3,11 +3,11 @@
 import sqlite3
 from datetime import datetime
 from typing import Optional
-from pathlib import Path
 
+from config import settings
 from .models import ProactiveEvent, ProactiveAction
 
-DB_PATH = Path(__file__).parent.parent / "data" / "doris.db"
+DB_PATH = settings.data_dir / "doris.db"
 
 
 def get_connection() -> sqlite3.Connection:

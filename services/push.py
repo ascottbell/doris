@@ -48,8 +48,9 @@ APNS_BUNDLE_ID = os.getenv("APNS_BUNDLE_ID", "com.doris.client")
 
 # APNS key path — set APNS_KEY_PATH env var or place key in credentials/ directory
 _key_filename = f"AuthKey_{APNS_KEY_ID}.p8" if APNS_KEY_ID else "AuthKey.p8"
+from config import settings
 APNS_KEY_PATH = Path(os.getenv("APNS_KEY_PATH", str(Path(__file__).parent.parent / "credentials" / _key_filename)))
-DB_PATH = Path(__file__).parent.parent / "data" / "doris.db"
+DB_PATH = settings.data_dir / "doris.db"
 
 # Bundle IDs per device type (APNS topic must match the receiving app's bundle ID)
 BUNDLE_IDS = {
