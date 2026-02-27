@@ -111,7 +111,11 @@ class Settings(BaseSettings):
         return self
 
     class Config:
-        env_file = str(Path(__file__).parent / ".env")
+        env_file = (
+            "/config/doris.env"
+            if Path("/config/doris.env").exists()
+            else str(Path(__file__).parent / ".env")
+        )
         extra = "ignore"  # Allow extra env vars without errors
 
 settings = Settings()
