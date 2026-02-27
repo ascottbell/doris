@@ -100,3 +100,59 @@ def test_state_modules_use_settings_data_dir(monkeypatch, tmp_path):
     import llm.token_budget
     importlib.reload(llm.token_budget)
     assert llm.token_budget.STATE_FILE == tmp_path / "token_budget_state.json"
+
+
+def _load_mcp_config_module(monkeypatch):
+    """Import mcp_client.config without triggering manager.py (which needs the mcp package).
+
+    Inserts a lightweight stub for the ``mcp_client`` package into ``sys.modules``
+    so that ``import mcp_client.config`` skips ``__init__.py`` and its heavy
+    ``from .manager import ...`` chain.
+    """
+    import importlib
+    import sys
+    import types
+
+    # Ensure the package entry exists but doesn't import manager.py
+    if "mcp_client" not in sys.modules or hasattr(sys.modules["mcp_client"], "__all__"):
+        stub = types.ModuleType("mcp_client")
+        stub.__path__ = [str(Path(__file__).parent.parent / "mcp_client")]
+        monkeypatch.setitem(sys.modules, "mcp_client", stub)
+
+    import mcp_client.config as mcp_config
+    importlib.reload(mcp_config)
+    return mcp_config
+
+
+def test_mcp_config_uses_config_dir(monkeypatch, tmp_path):
+    """MCP config should check config_dir/mcp_client.yaml first."""
+    external_yaml = tmp_path / "mcp_client.yaml"
+    external_yaml.write_text("""
+mcp_servers:
+  test-server:
+    type: stdio
+    command: echo
+    args: ["hello"]
+""")
+    monkeypatch.setenv("DORIS_CONFIG_DIR", str(tmp_path))
+
+    import importlib
+    import config
+    importlib.reload(config)
+
+    mcp_config = _load_mcp_config_module(monkeypatch)
+    servers = mcp_config.load_server_configs()
+    assert "test-server" in servers
+
+
+def test_mcp_config_falls_back_to_bundled(monkeypatch, tmp_path):
+    """When no external config exists, fall back to bundled servers.yaml."""
+    monkeypatch.setenv("DORIS_CONFIG_DIR", str(tmp_path))
+
+    import importlib
+    import config
+    importlib.reload(config)
+
+    mcp_config = _load_mcp_config_module(monkeypatch)
+    servers = mcp_config.load_server_configs()
+    assert isinstance(servers, dict)
