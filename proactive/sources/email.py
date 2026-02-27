@@ -8,10 +8,11 @@ Checks for emails that might need calendar events, reminders, or notifications.
 Focuses on family-relevant emails: school, activities, appointments.
 """
 
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from tools.gmail import scan_recent_emails, get_email_content
+from services_config import is_service_enabled
 from proactive.models import ProactiveEvent
 from security.prompt_safety import wrap_untrusted
 from proactive.db import (
@@ -61,6 +62,9 @@ def _was_wisdom_override(email: dict) -> tuple[bool, str | None]:
         return False, None
 
 
+logger = logging.getLogger(__name__)
+
+
 def monitor():
     """
     Main email monitor function.
@@ -68,7 +72,14 @@ def monitor():
     Called by the scheduler every 15 minutes.
     Scout pattern: detect actionable emails and hand off to Doris.
     """
+    if not is_service_enabled("email"):
+        logger.debug("[email-monitor] Email service not configured, skipping")
+        return
+
     print("[email-monitor] Checking for actionable emails...")
+
+    # Lazy import to avoid errors when Gmail dependencies are missing
+    from tools.gmail import scan_recent_emails, get_email_content
 
     try:
         # Get recent important emails (last 4 hours to catch up)
