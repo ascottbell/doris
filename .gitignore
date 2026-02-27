@@ -20,7 +20,7 @@ venv/
 # Logs and data
 logs/
 *.log
-data/*.db
+data/
 
 # IDE
 .idea/
