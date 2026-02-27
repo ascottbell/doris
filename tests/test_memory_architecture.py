@@ -290,7 +290,8 @@ def test_phase4_session_continuity():
 
     # Test 4.8: Checkpointing
     print("\n[4.8] Checkpointing...")
-    checkpoint_path = Path(__file__).parent.parent / "data" / "session_checkpoint.json"
+    from config import settings
+    checkpoint_path = settings.data_dir / "session_checkpoint.json"
     session1.checkpoint()
     assert checkpoint_path.exists()
     checkpoint_data = json.loads(checkpoint_path.read_text())
