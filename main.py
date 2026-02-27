@@ -128,6 +128,9 @@ def _start_sleep_time_compute(session):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Ensure data directory exists (supports external paths via DORIS_DATA_DIR)
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+
     # Security gate — refuse to start without auth tokens in production mode
     from config import validate_security_settings
     validate_security_settings()
