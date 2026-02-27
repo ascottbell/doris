@@ -36,3 +36,4 @@ bin/github-mcp-server
 
 # ESPHome build artifacts
 satellites/.esphome/
+.worktrees/
