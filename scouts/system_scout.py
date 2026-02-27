@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Optional
 
 from scouts.base import Scout, Observation, Relevance
+from config import settings
 
 PROJECT_ROOT = Path(__file__).parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
-DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = settings.data_dir
 
 
 class SystemScout(Scout):

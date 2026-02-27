@@ -16,6 +16,7 @@ from typing import Optional, Callable, Any
 from dataclasses import dataclass, field, asdict
 
 from security.file_io import atomic_json_write, locked_json_read, locked_json_update
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,8 @@ def _get_fernet():
 MAX_CONTEXT_TOKENS = 180_000  # Conservative limit for 200K model context
 COMPACTION_THRESHOLD = 0.80  # Trigger compaction at 80% capacity
 VERBATIM_TURNS = 20  # Keep last 20 exchanges verbatim
-CHECKPOINT_PATH = Path(__file__).parent.parent / "data" / "session_checkpoint.json"
-SESSIONS_DIR = Path(__file__).parent.parent / "data" / "sessions"
+CHECKPOINT_PATH = settings.data_dir / "session_checkpoint.json"
+SESSIONS_DIR = settings.data_dir / "sessions"
 
 # Token estimation (rough approximation: ~4 chars per token for English)
 CHARS_PER_TOKEN = 4
@@ -443,7 +444,7 @@ class PersistentSession:
 
 # --- Memory Metrics ---
 
-MEMORY_METRICS_PATH = Path(__file__).parent.parent / "data" / "memory_metrics.json"
+MEMORY_METRICS_PATH = settings.data_dir / "memory_metrics.json"
 
 
 def _default_memory_metrics() -> dict:

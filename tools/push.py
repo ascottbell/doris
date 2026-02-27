@@ -18,6 +18,7 @@ import os
 import asyncio
 from pathlib import Path
 from typing import Optional
+from config import settings
 
 # APNs configuration — all credentials from environment variables
 APNS_KEY_ID = os.getenv("APNS_KEY_ID", "")
@@ -30,7 +31,7 @@ _key_filename = f"AuthKey_{APNS_KEY_ID}.p8" if APNS_KEY_ID else "AuthKey.p8"
 APNS_KEY_PATH = Path(os.getenv("APNS_KEY_PATH", str(Path(__file__).parent.parent / "credentials" / _key_filename)))
 
 # Device tokens file
-DEVICE_TOKENS_FILE = Path(__file__).parent.parent / "data" / "device_tokens.json"
+DEVICE_TOKENS_FILE = settings.data_dir / "device_tokens.json"
 
 
 def load_config():

@@ -48,8 +48,9 @@ APNS_BUNDLE_ID = os.getenv("APNS_BUNDLE_ID", "com.doris.client")
 
 # APNS key path — set APNS_KEY_PATH env var or place key in credentials/ directory
 _key_filename = f"AuthKey_{APNS_KEY_ID}.p8" if APNS_KEY_ID else "AuthKey.p8"
+from config import settings
 APNS_KEY_PATH = Path(os.getenv("APNS_KEY_PATH", str(Path(__file__).parent.parent / "credentials" / _key_filename)))
-DB_PATH = Path(__file__).parent.parent / "data" / "doris.db"
+DB_PATH = settings.data_dir / "doris.db"
 
 # Bundle IDs per device type (APNS topic must match the receiving app's bundle ID)
 BUNDLE_IDS = {
@@ -144,7 +145,7 @@ def get_active_tokens() -> list[tuple[str, str]]:
         print(f"[push] SQLite token lookup failed: {e}")
 
     # Also check JSON file (main.py stores tokens there)
-    json_tokens_path = Path(__file__).parent.parent / "data" / "device_tokens.json"
+    json_tokens_path = settings.data_dir / "device_tokens.json"
     if json_tokens_path.exists():
         try:
             with open(json_tokens_path) as f:

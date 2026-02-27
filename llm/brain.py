@@ -58,7 +58,7 @@ _wisdom_summary_cache: str = None
 _wisdom_cache_time: float = 0
 WISDOM_CACHE_TTL = 600  # 10 minutes (recompiles rarely)
 
-WISDOM_SUMMARY_PATH = Path(__file__).parent.parent / "data" / "wisdom_summary.md"
+WISDOM_SUMMARY_PATH = settings.data_dir / "wisdom_summary.md"
 
 
 def _load_wisdom_summary() -> str:
@@ -210,7 +210,7 @@ No family information loaded. Seed the knowledge graph with your family details.
 
 # --- Token Usage Logging ---
 
-TOKEN_LOG_PATH = str(Path(__file__).parent.parent / "data" / "token_usage.jsonl")
+TOKEN_LOG_PATH = str(settings.data_dir / "token_usage.jsonl")
 
 def log_token_usage(
     input_tokens: int,
@@ -1573,8 +1573,7 @@ def _execute_tool_impl(name: str, args: dict) -> str:
             notify_logger.error(f"Failed to save notification to conversation: {e}")
             # Persist to undelivered file so it can be recovered
             try:
-                from pathlib import Path
-                undelivered_file = Path(__file__).parent.parent / "data" / "undelivered_notifications.json"
+                undelivered_file = settings.data_dir / "undelivered_notifications.json"
                 import json
                 existing = []
                 if undelivered_file.exists():
@@ -1726,10 +1725,9 @@ def _execute_tool_impl(name: str, args: dict) -> str:
 
     elif name == "get_scout_status":
         import json
-        from pathlib import Path
 
-        STATE_FILE = Path(__file__).parent.parent / "data" / "daemon_state.json"
-        DIGEST_FILE = Path(__file__).parent.parent / "data" / "awareness_digest.json"
+        STATE_FILE = settings.data_dir / "daemon_state.json"
+        DIGEST_FILE = settings.data_dir / "awareness_digest.json"
 
         result = {"daemon": {}, "scouts": {}, "observations": []}
 

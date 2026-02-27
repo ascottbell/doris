@@ -34,6 +34,9 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
+# Data directory — matches the docker-compose volume mount at /app/data
+ENV DORIS_DATA_DIR=/app/data
+
 # Create non-root user and data/log directories with correct ownership
 RUN useradd --create-home --shell /bin/bash doris && \
     mkdir -p /app/data /app/logs && \

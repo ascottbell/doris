@@ -17,7 +17,9 @@ from zoneinfo import ZoneInfo
 # Server start time — set by main.py lifespan on startup
 server_start_time: float = time.time()
 
-DATA_DIR = Path(__file__).parent.parent / "data"
+from config import settings
+
+DATA_DIR = settings.data_dir
 LOGS_DIR = Path(__file__).parent.parent / "logs"
 SCOUT_HEALTH_FILE = DATA_DIR / "scout_health.json"
 

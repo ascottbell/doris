@@ -5,8 +5,11 @@ Loads configuration from environment variables via pydantic-settings.
 All API keys and sensitive values should be set in .env file.
 """
 
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
 from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parent
 
 class Settings(BaseSettings):
     anthropic_api_key: str
@@ -31,7 +34,18 @@ class Settings(BaseSettings):
     # Observability
     sentry_dsn: str = ""  # Sentry DSN for error tracking
 
-    db_path: Path = Path(__file__).parent / "data" / "doris.db"
+    # Centralised path roots (override via DORIS_DATA_DIR / DORIS_CONFIG_DIR)
+    data_dir: Path = Field(
+        default=_PROJECT_ROOT / "data",
+        validation_alias=AliasChoices("data_dir", "DORIS_DATA_DIR"),
+    )
+    config_dir: Path = Field(
+        default=_PROJECT_ROOT,
+        validation_alias=AliasChoices("config_dir", "DORIS_CONFIG_DIR"),
+    )
+
+    # Sentinel empty path — model_validator below replaces with data_dir / "doris.db"
+    db_path: Path = Path("")
     ollama_model: str = "qwen3-coder:30b"  # Non-thinking instruct model, clean tool outputs
     claude_model: str = "claude-opus-4-6"  # Backward compat — use default_model for new code
 
@@ -88,6 +102,13 @@ class Settings(BaseSettings):
 
     # /mcp/call endpoint access control (direct MCP tool invocation bypassing LLM safety layers)
     mcp_call_allowed_tools: str = ""           # Comma-separated "server:tool" pairs (REQUIRED — empty = deny all)
+
+    @model_validator(mode="after")
+    def _derive_paths(self) -> "Settings":
+        """Set db_path from data_dir when it wasn't explicitly provided."""
+        if self.db_path == Path(""):
+            self.db_path = self.data_dir / "doris.db"
+        return self
 
     class Config:
         env_file = str(Path(__file__).parent / ".env")

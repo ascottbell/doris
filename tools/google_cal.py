@@ -17,10 +17,12 @@ from typing import Optional
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from config import settings
+
 logger = logging.getLogger("doris.google_cal")
 
 # Config persistence
-DATA_DIR = Path(__file__).parent.parent / "data"
+DATA_DIR = settings.data_dir
 CONFIG_PATH = DATA_DIR / "school_calendar.json"
 
 # Default calendar name

@@ -20,7 +20,7 @@ venv/
 # Logs and data
 logs/
 *.log
-data/*.db
+data/
 
 # IDE
 .idea/
@@ -36,3 +36,4 @@ bin/github-mcp-server
 
 # ESPHome build artifacts
 satellites/.esphome/
+.worktrees/

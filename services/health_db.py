@@ -7,9 +7,10 @@ Stores Apple Health data in SQLite and generates insights for Doris memory.
 import sqlite3
 import json
 from datetime import datetime, timedelta
-from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "data" / "doris.db"
+from config import settings
+
+DB_PATH = settings.data_dir / "doris.db"
 
 
 def get_connection() -> sqlite3.Connection:

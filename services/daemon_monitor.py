@@ -15,10 +15,12 @@ from typing import Optional
 
 import aiohttp
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
 # Configuration
-STATE_FILE = Path(__file__).parent.parent / "data" / "daemon_state.json"
+STATE_FILE = settings.data_dir / "daemon_state.json"
 DAEMON_LABEL = "com.doris.daemon"
 CHECK_INTERVAL_SECONDS = 120  # Check every 2 minutes
 HEARTBEAT_STALE_SECONDS = 300  # Consider stale after 5 minutes

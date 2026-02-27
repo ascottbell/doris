@@ -9,10 +9,11 @@ Analyzes query logs to learn:
 
 import sqlite3
 from datetime import datetime
-from pathlib import Path
 from collections import defaultdict
 
-DB_PATH = Path(__file__).parent.parent / "data" / "doris.db"
+from config import settings
+
+DB_PATH = settings.data_dir / "doris.db"
 
 
 def analyze_query_patterns() -> dict:

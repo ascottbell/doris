@@ -28,11 +28,12 @@ from zoneinfo import ZoneInfo
 
 from scouts.base import Observation, Relevance
 from security.file_io import locked_json_read, locked_json_update, atomic_json_write
+from config import settings
 
 logger = logging.getLogger("doris.sitrep")
 
 # Persistence directory
-SITREP_DIR = Path(__file__).parent.parent / "data" / "sitrep"
+SITREP_DIR = settings.data_dir / "sitrep"
 
 # Instant lane: these scouts bypass sitrep review entirely
 # (No HomeAssistant in open-source version — add your own if needed)

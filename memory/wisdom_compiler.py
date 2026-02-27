@@ -16,10 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from config import settings
+
 logger = logging.getLogger("doris.wisdom_compiler")
 
 # Paths
-DATA_DIR = Path(__file__).parent.parent / "data"
+DATA_DIR = settings.data_dir
 SUMMARY_PATH = DATA_DIR / "wisdom_summary.md"
 STATE_PATH = DATA_DIR / "wisdom_compiler_state.json"
 

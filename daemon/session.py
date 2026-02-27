@@ -17,10 +17,12 @@ from pathlib import Path
 from typing import Optional
 import logging
 
+from config import settings
+
 logger = logging.getLogger("doris.session")
 
 # Session state file
-SESSION_FILE = Path(__file__).parent.parent / "data" / "session_state.json"
+SESSION_FILE = settings.data_dir / "session_state.json"
 
 # Token thresholds
 MAX_CONTEXT_TOKENS = 100_000  # Rough limit before compaction

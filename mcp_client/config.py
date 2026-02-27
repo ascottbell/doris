@@ -116,19 +116,22 @@ def load_server_configs(config_path: Optional[Path] = None) -> dict[str, ServerC
 
     Looks for configuration in this order:
     1. Provided config_path
-    2. <project_root>/mcp/servers.yaml
-    3. Falls back to DEFAULT_SERVERS
+    2. settings.config_dir / "mcp_client.yaml" (external/user config)
+    3. Bundled servers.yaml next to this file
+    4. Falls back to DEFAULT_SERVERS
 
     Returns:
         Dict mapping server name to ServerConfig
     """
+    from config import settings
+
     servers = {}
-
-    # Try to load from YAML file
-    if config_path is None:
-        config_path = Path(__file__).parent / "servers.yaml"
-
     raw_configs = DEFAULT_SERVERS.copy()
+
+    if config_path is None:
+        external = settings.config_dir / "mcp_client.yaml"
+        bundled = Path(__file__).parent / "servers.yaml"
+        config_path = external if external.exists() else bundled
 
     if config_path.exists():
         _check_yaml_permissions(config_path)

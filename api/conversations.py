@@ -11,13 +11,14 @@ import uuid
 import logging
 from datetime import datetime, timedelta
 from typing import Literal, Optional
-from pathlib import Path
 from pydantic import BaseModel
+
+from config import settings
 
 logger = logging.getLogger(__name__)
 
 # Database path — same file used by memory/store.py
-DB_PATH = Path(__file__).parent.parent / "data" / "doris.db"
+DB_PATH = settings.data_dir / "doris.db"
 
 
 def _get_db() -> sqlite3.Connection:

@@ -128,6 +128,9 @@ def _start_sleep_time_compute(session):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Ensure data directory exists (supports external paths via DORIS_DATA_DIR)
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+
     # Security gate — refuse to start without auth tokens in production mode
     from config import validate_security_settings
     validate_security_settings()
@@ -592,7 +595,7 @@ class DeviceRegisterRequest(BaseModel):
 
 # Store device tokens (in-memory for now, persisted to encrypted file)
 _device_tokens: dict[str, dict] = {}
-_device_tokens_file = Path(__file__).parent / "data" / "device_tokens.json"
+_device_tokens_file = settings.data_dir / "device_tokens.json"
 
 # Encryption for device tokens at rest (same pattern as session/persistent.py)
 _DEVICE_SALT = b"doris-device-tokens-v1"
