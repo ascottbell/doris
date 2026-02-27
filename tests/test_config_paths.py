@@ -38,6 +38,7 @@ def test_data_dir_env_override(monkeypatch, tmp_path):
 
     s = Settings()
     assert s.data_dir == tmp_path
+    assert s.db_path == tmp_path / "doris.db"
 
 
 def test_config_dir_env_override(monkeypatch, tmp_path):
