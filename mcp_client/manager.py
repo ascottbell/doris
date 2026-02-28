@@ -7,6 +7,7 @@ and routes tool calls to the correct server.
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from contextlib import asynccontextmanager
@@ -146,20 +147,44 @@ class MCPManager:
 
     async def _connect_stdio(self, name: str, config: StdioServerConfig) -> None:
         """Connect to a stdio-based MCP server."""
+        # Always pass the full parent environment. The MCP SDK's default only
+        # inherits HOME/PATH/SHELL/USER — our subprocesses need OLLAMA_HOST,
+        # DORIS_DATA_DIR, ANTHROPIC_API_KEY, etc.
+        merged_env = {**os.environ, **(config.env or {})}
+
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
-            env=config.env if config.env else None,
+            env=merged_env,
         )
 
-        # Start the transport
+        # Start the transport — clean up on failure to avoid leaking cancel scopes
         transport_cm = stdio_client(server_params)
-        read, write = await transport_cm.__aenter__()
+        try:
+            read, write = await transport_cm.__aenter__()
+        except BaseException:
+            # Ensure partial context is cleaned up
+            try:
+                await transport_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise
 
         # Create and initialize session
         session_cm = ClientSession(read, write)
-        session = await session_cm.__aenter__()
-        await session.initialize()
+        try:
+            session = await session_cm.__aenter__()
+            await session.initialize()
+        except BaseException:
+            try:
+                await session_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            try:
+                await transport_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise
 
         # Get available tools
         tools_result = await session.list_tools()
@@ -178,14 +203,32 @@ class MCPManager:
 
     async def _connect_http(self, name: str, config: HttpServerConfig) -> None:
         """Connect to an HTTP-based MCP server."""
-        # Start the transport
+        # Start the transport — clean up on failure to avoid leaking cancel scopes
         transport_cm = streamablehttp_client(config.url, headers=config.headers)
-        read, write, _ = await transport_cm.__aenter__()
+        try:
+            read, write, _ = await transport_cm.__aenter__()
+        except BaseException:
+            try:
+                await transport_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise
 
         # Create and initialize session
         session_cm = ClientSession(read, write)
-        session = await session_cm.__aenter__()
-        await session.initialize()
+        try:
+            session = await session_cm.__aenter__()
+            await session.initialize()
+        except BaseException:
+            try:
+                await session_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            try:
+                await transport_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise
 
         # Get available tools
         tools_result = await session.list_tools()

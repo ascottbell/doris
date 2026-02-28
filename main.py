@@ -208,11 +208,11 @@ async def lifespan(app: FastAPI):
                     await adapter.start(_channel_handler)
                     active_channels.append(adapter)
                     print(f"[Channel] {adapter.name} adapter started")
-                except Exception as e:
+                except BaseException as e:
                     print(f"[Channel] Warning: {adapter.name} failed to start: {e}")
         else:
             print("[Channel] No channels configured (API-only mode)")
-    except Exception as e:
+    except BaseException as e:
         print(f"[Channel] Warning: Could not initialize channel adapters: {e}")
 
     # Initialize proactive system (calendar reminders, weather alerts, email monitoring)
