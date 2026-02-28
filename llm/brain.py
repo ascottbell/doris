@@ -11,8 +11,10 @@ Includes:
 - Health tracking for graceful degradation
 """
 
+import base64
 import json
 import re
+import threading
 import time
 import logging
 from datetime import datetime
@@ -23,6 +25,11 @@ from zoneinfo import ZoneInfo
 from config import settings
 from mcp_client import get_mcp_manager, get_event_loop
 import asyncio
+
+# Thread-local storage for per-request media accumulation.
+# chat() runs in a ThreadPoolExecutor — each concurrent call gets its own
+# thread, so threading.local() provides natural per-request isolation.
+_tls = threading.local()
 
 from llm.tools import TOOLS, WISDOM_REQUIRED_TOOLS, WISDOM_ENABLED_TOOLS, should_log_wisdom
 from llm.types import StopReason, TokenUsage, LLMResponse, StreamEvent, ToolCall, ToolResult
@@ -376,7 +383,7 @@ Day of week: {day_of_week}
 # The following line lets `from llm.brain import TOOLS` still work:
 # (already imported at module level above)
 
-def get_system_prompt(location: dict = None, speaker: str = None) -> str:
+def get_system_prompt(location: dict = None, speaker: str = None, channel: str = None) -> str:
     """
     Build system prompt from WORM persona + dynamic context.
 
@@ -452,17 +459,29 @@ def get_system_prompt(location: dict = None, speaker: str = None) -> str:
     # === WISDOM LAYER (learned experience, evolves slowly) ===
     wisdom_summary = _load_wisdom_summary()
 
-    # Assemble: WORM (with markers) + Wisdom + Dynamic Context
+    # === MCP TOOLS LAYER (dynamic, from connected servers) ===
+    mcp_tools_section = ""
+    try:
+        mcp_manager = get_mcp_manager()
+        mcp_prompt = mcp_manager.get_tools_for_prompt()
+        if mcp_prompt:
+            mcp_tools_section = f"\n\n## {mcp_prompt}"
+    except Exception:
+        pass
+
+    # Assemble: WORM (with markers) + Wisdom + MCP Tools + Dynamic Context
     # The markers allow compaction engine to identify and preserve WORM content
     prompt = f"{WORM_START_MARKER}\n{worm_persona}\n{WORM_END_MARKER}"
     if wisdom_summary:
         prompt += f"\n\n## Learned Wisdom\nThis is your compiled understanding of the user's preferences and patterns, distilled from real decisions and feedback. If the user asks what you've learned about them, answer from this. This is NOT part of your immutable identity — it evolves as you learn.\n\n{wisdom_summary}"
+    if mcp_tools_section:
+        prompt += mcp_tools_section
     prompt += f"\n\n{dynamic_context}"
 
     return prompt
 
 
-def get_system_prompt_cached(location: dict = None, speaker: str = None) -> list:
+def get_system_prompt_cached(location: dict = None, speaker: str = None, channel: str = None) -> list:
     """
     Get system prompt as separate static (cached) and dynamic (uncached) blocks.
 
@@ -530,6 +549,28 @@ def get_system_prompt_cached(location: dict = None, speaker: str = None) -> list
             pass
     else:
         dynamic_text += "\n\n## Current Speaker\nSpeaker not identified. Assume it's the primary user unless context suggests otherwise."
+
+    # Add channel context so the LLM knows what platform it's on
+    if channel:
+        from channels.base import CHANNEL_CAPABILITIES
+        caps = CHANNEL_CAPABILITIES.get(channel)
+        dynamic_text += f"\n\n## Current Channel\nYou are responding on: {channel}"
+        if caps:
+            sendable = []
+            if caps.can_send_images:
+                sendable.append("images")
+            if caps.can_send_documents:
+                sendable.append("documents/files")
+            if caps.can_send_audio:
+                sendable.append("audio")
+            if caps.can_send_video:
+                sendable.append("video")
+            if sendable:
+                dynamic_text += f"\nYou CAN send: {', '.join(sendable)}"
+                dynamic_text += "\nTo send a file, use an MCP tool that returns file content — it will be delivered automatically."
+            else:
+                dynamic_text += "\nThis channel is text-only. Do not attempt to send files."
+            dynamic_text += f"\nMax message length: {caps.max_message_length}"
 
     return [
         {
@@ -1786,8 +1827,104 @@ def _execute_tool_impl(name: str, args: dict) -> str:
 
         return json.dumps(result, indent=2)
 
+    elif name == "mcp_tool":
+        return _execute_mcp_generic(args)
+
     else:
         return f"Unknown tool: {name}"
+
+
+def _execute_mcp_generic(args: dict) -> str:
+    """Execute any tool on any connected MCP server."""
+    qualified = args.get("tool", "")
+    if ":" not in qualified:
+        return f"Invalid tool name '{qualified}'. Use 'server:tool_name' format."
+
+    server_name, tool_name = qualified.split(":", 1)
+    tool_args = args.get("arguments") or {}
+
+    manager = get_mcp_manager()
+    if server_name not in manager.connected_servers:
+        return f"MCP server '{server_name}' is not connected. Connected: {', '.join(manager.connected_servers)}"
+
+    # Resolve tool name with case-insensitive fallback
+    resolved = manager.resolve_tool_name(server_name, tool_name)
+    if resolved is None:
+        available = [t.name for t in manager._servers[server_name].tools]
+        return (
+            f"Tool '{tool_name}' not found on server '{server_name}'. "
+            f"Available tools: {', '.join(available)}"
+        )
+    tool_name = resolved
+
+    import asyncio
+    loop = get_event_loop()
+    if loop is None or loop.is_closed():
+        return "MCP event loop not available"
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            manager.call_tool(server_name, tool_name, tool_args), loop
+        )
+        result = future.result(timeout=60)
+        return _quarantine_mcp_result(server_name, tool_name, result)
+    except KeyError as e:
+        return f"MCP error: {e}"
+    except Exception as e:
+        return f"MCP tool {server_name}:{tool_name} failed: {type(e).__name__}: {e}"
+
+
+def _save_mcp_binary(data_b64: str, mime_type: str, server_name: str, tool_name: str) -> Path | None:
+    """Decode base64 MCP content and save to data/mcp_files/.
+
+    Returns the saved file path, or None on failure.
+    """
+    try:
+        raw = base64.b64decode(data_b64)
+    except Exception as e:
+        logger.warning("Failed to decode base64 MCP binary from %s:%s: %s", server_name, tool_name, e)
+        return None
+
+    # Determine file extension from MIME type
+    ext_map = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "application/pdf": ".pdf",
+        "audio/mpeg": ".mp3",
+        "audio/ogg": ".ogg",
+        "video/mp4": ".mp4",
+        "text/plain": ".txt",
+    }
+    ext = ext_map.get(mime_type, ".bin")
+
+    mcp_files_dir = settings.data_dir / "mcp_files"
+    mcp_files_dir.mkdir(parents=True, exist_ok=True)
+
+    # Unique filename to avoid collisions
+    import uuid
+    filename = f"{server_name}_{tool_name}_{uuid.uuid4().hex[:8]}{ext}"
+    filepath = mcp_files_dir / filename
+
+    try:
+        filepath.write_bytes(raw)
+        logger.info("Saved MCP binary: %s (%d bytes, %s)", filepath.name, len(raw), mime_type)
+        return filepath
+    except OSError as e:
+        logger.error("Failed to save MCP binary to %s: %s", filepath, e)
+        return None
+
+
+def _mime_to_media_type(mime_type: str) -> str:
+    """Map a MIME type to a Telegram-style media type string."""
+    if mime_type.startswith("image/"):
+        return "photo"
+    if mime_type.startswith("video/"):
+        return "video"
+    if mime_type.startswith("audio/"):
+        return "audio"
+    return "document"
 
 
 def _quarantine_mcp_text(server_name: str, tool_name: str, text: str) -> str:
@@ -1827,10 +1964,26 @@ def _quarantine_mcp_text(server_name: str, tool_name: str, text: str) -> str:
 
 
 def _quarantine_mcp_result(server_name: str, tool_name: str, result) -> str:
-    """Extract text from a CallToolResult, then quarantine it."""
+    """Extract text from a CallToolResult, then quarantine it.
+
+    Also checks for binary content (base64-encoded data with a mimeType).
+    Binary items are saved to data/mcp_files/ and appended to the
+    thread-local pending_media list for the channel adapter to pick up.
+    """
     text = "Done"
     if result.content:
         for content in result.content:
+            # Check for binary/blob content (e.g., images, documents)
+            if hasattr(content, 'data') and hasattr(content, 'mimeType') and content.data:
+                saved_path = _save_mcp_binary(content.data, content.mimeType, server_name, tool_name)
+                if saved_path:
+                    media_type = _mime_to_media_type(content.mimeType)
+                    media_item = {"type": media_type, "file": str(saved_path), "source": f"{server_name}:{tool_name}"}
+                    if not hasattr(_tls, 'pending_media'):
+                        _tls.pending_media = []
+                    _tls.pending_media.append(media_item)
+                    text = f"[File saved: {saved_path.name} ({content.mimeType})]"
+                    continue
             if hasattr(content, 'text'):
                 text = content.text
                 break
@@ -2329,23 +2482,24 @@ def _execute_web_search(args: dict) -> str:
 
 class ClaudeResponse:
     """Response from Claude with token usage tracking."""
-    def __init__(self, text: str, input_tokens: int = 0, output_tokens: int = 0, tools_called: list = None):
+    def __init__(self, text: str, input_tokens: int = 0, output_tokens: int = 0, tools_called: list = None, media: list = None):
         self.text = text
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.tools_called = tools_called or []
+        self.media = media or []
 
     def __str__(self):
         return self.text
 
 
 @retry_with_backoff(max_retries=3, base_delay=1.0, exponential_base=2.0)
-def _call_provider_api(messages: list, location: dict = None, speaker: str = None) -> LLMResponse:
+def _call_provider_api(messages: list, location: dict = None, speaker: str = None, channel: str = None) -> LLMResponse:
     """Make a single LLM call via the configured provider with retry support."""
     provider = get_llm_provider()
     return provider.complete(
         messages,
-        system=get_system_prompt_cached(location=location, speaker=speaker),
+        system=get_system_prompt_cached(location=location, speaker=speaker, channel=channel),
         tools=TOOLS,
         max_tokens=1024,
         source="chat",
@@ -2371,7 +2525,7 @@ def _check_budget_preflight() -> bool:
         return True  # Don't block on tracker errors
 
 
-def chat(message: str, history: list = None, return_usage: bool = False, location: dict = None, speaker: str = None, use_session: bool = False, session_key: str = None) -> str | ClaudeResponse:
+def chat(message: str, history: list = None, return_usage: bool = False, location: dict = None, speaker: str = None, use_session: bool = False, session_key: str = None, channel: str = None) -> str | ClaudeResponse:
     """
     Send a message to the LLM and get a response.
 
@@ -2390,6 +2544,9 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
     Returns:
         str (default) or ClaudeResponse with text and token counts
     """
+    # Clear thread-local media accumulator for this request
+    _tls.pending_media = []
+
     # Session mode: use persistent session for context
     session = None
     if use_session:
@@ -2443,7 +2600,7 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
         iteration += 1
 
         try:
-            response = _call_provider_api(messages, location, speaker)
+            response = _call_provider_api(messages, location, speaker, channel)
         except Exception as e:
             # Retry logic exhausted - return fallback
             logger.error(f"LLM API failed after retries: {e}")
@@ -2459,7 +2616,7 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
             tool_results = []
             for tc in response.tool_calls:
                 print(f"[tool: {tc.name}]")
-                all_tools_called.append({"name": tc.name, "args": tc.arguments})
+                tool_error = None
 
                 # Check if this tool has already failed - don't let Doris retry in a loop
                 if tc.name in failed_tools and failed_tools[tc.name] >= 1:
@@ -2469,6 +2626,7 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
                         f"Want me to try a different approach?' "
                         f"Then wait for the user's response."
                     )
+                    tool_error = "blocked: repeated failure"
                     logger.warning(f"Blocking retry of failed tool: {tc.name}")
                 else:
                     try:
@@ -2477,10 +2635,16 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
 
                     except Exception as e:
                         tool_result_str = f"Error executing tool: {str(e)}"
+                        tool_error = str(e)
                         logger.error(f"Tool execution failed: {tc.name} - {e}")
                         # Track the failure
                         failed_tools[tc.name] = failed_tools.get(tc.name, 0) + 1
 
+                all_tools_called.append({
+                    "name": tc.name,
+                    "args": tc.arguments,
+                    "error": tool_error,
+                })
                 tool_results.append(ToolResult(tool_call_id=tc.id, content=tool_result_str))
 
             # Thread tool results back via provider (handles format differences)
@@ -2507,8 +2671,11 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
             cache_read_tokens=total_usage.cache_read_tokens
         )
 
+        # Harvest any media accumulated during tool execution
+        accumulated_media = getattr(_tls, 'pending_media', [])
+
         if return_usage:
-            return ClaudeResponse(final_text, total_usage.input_tokens, total_usage.output_tokens, tools_called=all_tools_called)
+            return ClaudeResponse(final_text, total_usage.input_tokens, total_usage.output_tokens, tools_called=all_tools_called, media=accumulated_media)
         return final_text
 
     # Hit max iterations - something is wrong
@@ -2528,8 +2695,10 @@ def chat(message: str, history: list = None, return_usage: bool = False, locatio
         cache_read_tokens=total_usage.cache_read_tokens
     )
 
+    accumulated_media = getattr(_tls, 'pending_media', [])
+
     if return_usage:
-        return ClaudeResponse(fallback, total_usage.input_tokens, total_usage.output_tokens, tools_called=all_tools_called)
+        return ClaudeResponse(fallback, total_usage.input_tokens, total_usage.output_tokens, tools_called=all_tools_called, media=accumulated_media)
     return fallback
 
 

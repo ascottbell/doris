@@ -17,6 +17,39 @@ from channels.base import ChannelAdapter, IncomingMessage, MessageHandler
 logger = logging.getLogger(__name__)
 
 
+def _format_tool_summary(tools_called: list[dict]) -> str:
+    """Format MCP tool calls as a compact summary for user visibility.
+
+    Only includes mcp_tool calls (skips internal tools like get_weather).
+    Returns empty string if no MCP tools were called.
+    """
+    lines = []
+    for tc in tools_called:
+        if tc["name"] != "mcp_tool":
+            continue
+        # Extract the qualified tool name and key args
+        args = tc.get("args") or {}
+        tool_name = args.get("tool", "unknown")
+        tool_args = args.get("arguments") or {}
+        error = tc.get("error")
+
+        # Build compact arg summary (skip overly verbose values)
+        arg_parts = []
+        for k, v in tool_args.items():
+            sv = str(v)
+            if len(sv) > 40:
+                sv = sv[:37] + "..."
+            arg_parts.append(f"{k}={sv}")
+        arg_str = ", ".join(arg_parts)
+
+        if error:
+            lines.append(f"\u26a0\ufe0f {tool_name}({arg_str}) — error")
+        else:
+            lines.append(f"\U0001f527 {tool_name}({arg_str})")
+
+    return "\n".join(lines)
+
+
 def create_adapters_from_config(settings) -> list[ChannelAdapter]:
     """Create channel adapters based on settings.channel.
 
@@ -94,7 +127,7 @@ def create_message_handler() -> MessageHandler:
     """
     from llm.brain import chat, ClaudeResponse
 
-    async def handler(message: IncomingMessage) -> AsyncGenerator[str, None]:
+    async def handler(message: IncomingMessage) -> AsyncGenerator[str | dict, None]:
         start = time.time()
 
         # Isolate session by channel + sender to prevent cross-channel context leakage
@@ -109,6 +142,7 @@ def create_message_handler() -> MessageHandler:
                 use_session=True,
                 session_key=session_key,
                 speaker=message.sender_name,
+                channel=message.channel,
             ),
         )
 
@@ -116,22 +150,36 @@ def create_message_handler() -> MessageHandler:
             text = response.text
             tokens_in = response.input_tokens
             tokens_out = response.output_tokens
+            media = response.media or []
+            tools_called = response.tools_called or []
         else:
             text = str(response)
             tokens_in = 0
             tokens_out = 0
+            media = []
+            tools_called = []
 
         latency_ms = int((time.time() - start) * 1000)
 
         logger.info(
-            "[Channel:%s] %s -> %d chars (%dms, %d out tokens)",
+            "[Channel:%s] %s -> %d chars, %d media (%dms, %d out tokens)",
             message.channel,
             message.sender_id,
             len(text),
+            len(media),
             latency_ms,
             tokens_out,
         )
 
         yield text
+
+        # Yield compact tool summary so users can see what was actually called
+        tool_summary = _format_tool_summary(tools_called)
+        if tool_summary:
+            yield tool_summary
+
+        # Yield media as a dict for adapters that support it
+        if media:
+            yield {"media": media}
 
     return handler

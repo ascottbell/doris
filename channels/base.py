@@ -12,11 +12,70 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Channel capabilities — what each platform supports
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ChannelCapabilities:
+    """Describes what a channel can send/receive."""
+
+    can_send_images: bool = False
+    can_send_documents: bool = False
+    can_send_audio: bool = False
+    can_send_video: bool = False
+    can_edit_messages: bool = False
+    max_message_length: int = 4096
+    supports_markdown: bool = False
+
+
+CHANNEL_CAPABILITIES: dict[str, ChannelCapabilities] = {
+    "telegram": ChannelCapabilities(
+        can_send_images=True,
+        can_send_documents=True,
+        can_send_audio=True,
+        can_send_video=True,
+        can_edit_messages=True,
+        max_message_length=4096,
+        supports_markdown=True,
+    ),
+    "discord": ChannelCapabilities(
+        can_send_images=True,
+        can_send_documents=True,
+        can_send_audio=False,
+        can_send_video=False,
+        can_edit_messages=True,
+        max_message_length=2000,
+        supports_markdown=True,
+    ),
+    "bluebubbles": ChannelCapabilities(
+        can_send_images=False,
+        can_send_documents=False,
+        can_send_audio=False,
+        can_send_video=False,
+        can_edit_messages=False,
+        max_message_length=4000,
+        supports_markdown=False,
+    ),
+    "webhook": ChannelCapabilities(
+        can_send_images=False,
+        can_send_documents=False,
+        can_send_audio=False,
+        can_send_video=False,
+        can_edit_messages=False,
+        max_message_length=50_000,
+        supports_markdown=False,
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -61,12 +120,20 @@ class OutgoingMessage(BaseModel):
     metadata: dict = Field(default_factory=dict)
     """Platform-specific extras (e.g., reply_to_message_id)."""
 
+    media: list[dict] = Field(default_factory=list)
+    """Optional media to include with the message.
+
+    Each item should be a dict with at least a ``type`` key (e.g.
+    ``photo``, ``document``) and a ``file`` value that may be a
+    path, URL, ``telegram.File`` object, or existing file_id.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Handler type
 # ---------------------------------------------------------------------------
 
-MessageHandler = Callable[[IncomingMessage], AsyncGenerator[str, None]]
+MessageHandler = Callable[[IncomingMessage], AsyncGenerator[str | dict, None]]
 """
 Async generator that yields text chunks as Doris generates a response.
 
@@ -82,15 +149,18 @@ Each adapter decides how to consume the stream:
 # ---------------------------------------------------------------------------
 
 
-async def collect_response(stream: AsyncGenerator[str, None]) -> str:
+async def collect_response(stream: AsyncGenerator[str | dict, None]) -> str:
     """Accumulate all chunks from a streaming handler into a single string.
 
     Use this in adapters that don't support incremental delivery
     (e.g., BlueBubbles/iMessage where messages are atomic).
+
+    Non-string chunks (e.g., media dicts) are silently skipped.
     """
     chunks: list[str] = []
     async for chunk in stream:
-        chunks.append(chunk)
+        if isinstance(chunk, str):
+            chunks.append(chunk)
     return "".join(chunks)
 
 
@@ -143,8 +213,18 @@ class ChannelAdapter(ABC):
         """
 
     @abstractmethod
-    async def send_message(self, conversation_id: str, text: str) -> None:
+    async def send_message(
+        self,
+        conversation_id: str,
+        text: str,
+        metadata: dict | None = None,
+    ) -> None:
         """Send a proactive message (Doris-initiated, e.g., notifications).
+
+        `metadata` is an optional dictionary that adapters can interpret
+        for platform-specific features such as media attachments, reply
+        IDs, etc.  The base class itself does not inspect it, but
+        concrete adapters may choose to.
 
         Raises RuntimeError if the adapter is not running.
         """
@@ -155,7 +235,7 @@ class ChannelAdapter(ABC):
         self,
         handler: MessageHandler,
         message: IncomingMessage,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str | dict, None]:
         """Wrap a handler call with error handling.
 
         Catches exceptions from the handler, logs them, and yields an

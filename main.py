@@ -126,8 +126,31 @@ def _start_sleep_time_compute(session):
     )
 
 
+def _configure_file_logging() -> None:
+    """Add a DEBUG-level file handler to the root logger."""
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    log_path = os.getenv("DORIS_LOG_DIR", str(Path(__file__).parent / "logs"))
+    os.makedirs(log_path, exist_ok=True)
+    handler = RotatingFileHandler(
+        os.path.join(log_path, "app.log"),
+        maxBytes=20 * 1024 * 1024,  # 20 MB
+        backupCount=3,
+    )
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(name)s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logging.root.addHandler(handler)
+    logging.root.setLevel(logging.DEBUG)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _configure_file_logging()
+
     # Ensure data directory exists (supports external paths via DORIS_DATA_DIR)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 

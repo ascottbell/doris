@@ -598,8 +598,17 @@ class MyAdapter(ChannelAdapter):
         self._running = False
         # Clean up connections, finish in-flight messages
 
-    async def send_message(self, conversation_id: str, text: str) -> None:
-        """Send a proactive message (Doris-initiated)."""
+    async def send_message(
+        self,
+        conversation_id: str,
+        text: str,
+        metadata: dict | None = None,
+    ) -> None:
+        """Send a proactive message (Doris-initiated).
+
+        `metadata` can include platform-specific hints such as media
+        attachments (see ``OutgoingMessage`` below).
+        """
         self._check_running()  # Raises if not started
         # Send via your platform's API
 ```
@@ -609,19 +618,21 @@ class MyAdapter(ChannelAdapter):
 ```python
 @dataclass
 class IncomingMessage:
-    text: str                           # Message content
+    text: str                           # Message content (may be empty when only media is sent)
     sender_id: str                      # Platform user ID
     conversation_id: str                # Platform chat/thread ID
     channel: str                        # "telegram", "discord", etc.
     sender_name: str | None = None      # Display name
     timestamp: datetime | None = None   # Platform timestamp
     metadata: dict = {}                 # Platform-specific extras
+    media: list[dict] = []              # Optional list of attachments sent with the message
 
 @dataclass
 class OutgoingMessage:
     text: str                           # Response content
     conversation_id: str                # Where to send
     metadata: dict = {}                 # Platform-specific extras
+    media: list[dict] = []              # Optional media attachments (see channel-specific docs)
 ```
 
 **Handler type:**

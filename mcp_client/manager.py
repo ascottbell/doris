@@ -103,7 +103,13 @@ class MCPManager:
 
         for name, config in enabled.items():
             try:
-                await self._connect_server(name, config)
+                # Isolate each connection in its own Task so cancel scope
+                # corruption from the MCP SDK stays contained in the child
+                # task and can't crash the parent event loop.
+                await asyncio.wait_for(
+                    asyncio.create_task(self._connect_server(name, config)),
+                    timeout=30.0,
+                )
                 results[name] = True
                 server = self._servers[name]
                 tool_count = len(server.tools)
@@ -120,11 +126,12 @@ class MCPManager:
                     )
                 if verbose:
                     print(f"  [ok] {name}: {tool_count} tools (trust={trust})")
-            except Exception as e:
+            except BaseException as e:
                 results[name] = False
-                logger.error(f"[MCP] Failed to connect to '{name}': {e}")
+                logger.error(f"[MCP] Failed to connect to '{name}': {type(e).__name__}: {e}")
+                logger.debug(f"[MCP] {name} connection traceback:", exc_info=True)
                 if verbose:
-                    print(f"  [fail] {name}: {e}")
+                    print(f"  [fail] {name}: {type(e).__name__}: {e}")
 
         if verbose:
             connected = sum(1 for v in results.values() if v)
@@ -166,8 +173,8 @@ class MCPManager:
             # Ensure partial context is cleaned up
             try:
                 await transport_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except BaseException:
+                pass  # suppress cancel scope leak from MCP SDK
             raise
 
         # Create and initialize session
@@ -178,12 +185,12 @@ class MCPManager:
         except BaseException:
             try:
                 await session_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except BaseException:
+                pass  # suppress cancel scope leak from MCP SDK
             try:
                 await transport_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except BaseException:
+                pass  # suppress cancel scope leak from MCP SDK
             raise
 
         # Get available tools
@@ -206,12 +213,14 @@ class MCPManager:
         # Start the transport — clean up on failure to avoid leaking cancel scopes
         transport_cm = streamablehttp_client(config.url, headers=config.headers)
         try:
-            read, write, _ = await transport_cm.__aenter__()
+            read, write, _ = await asyncio.wait_for(
+                transport_cm.__aenter__(), timeout=15.0
+            )
         except BaseException:
             try:
                 await transport_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except BaseException:
+                pass  # suppress cancel scope leak from MCP SDK
             raise
 
         # Create and initialize session
@@ -222,12 +231,12 @@ class MCPManager:
         except BaseException:
             try:
                 await session_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except BaseException:
+                pass  # suppress cancel scope leak from MCP SDK
             try:
                 await transport_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except BaseException:
+                pass  # suppress cancel scope leak from MCP SDK
             raise
 
         # Get available tools
@@ -255,13 +264,19 @@ class MCPManager:
                 try:
                     # Close session first
                     if server._session_cm:
-                        await server._session_cm.__aexit__(None, None, None)
+                        try:
+                            await server._session_cm.__aexit__(None, None, None)
+                        except BaseException:
+                            pass  # suppress cancel scope leak from MCP SDK
                     # Then close transport
                     if server._transport_cm:
-                        await server._transport_cm.__aexit__(None, None, None)
+                        try:
+                            await server._transport_cm.__aexit__(None, None, None)
+                        except BaseException:
+                            pass  # suppress cancel scope leak from MCP SDK
                     if verbose:
                         print(f"  [ok] Disconnected from {name}")
-                except Exception as e:
+                except BaseException as e:
                     if verbose:
                         print(f"  [warn] Error disconnecting from {name}: {e}")
 
@@ -279,10 +294,16 @@ class MCPManager:
             server = self._servers[name]
             try:
                 if server._session_cm:
-                    await server._session_cm.__aexit__(None, None, None)
+                    try:
+                        await server._session_cm.__aexit__(None, None, None)
+                    except BaseException:
+                        pass  # suppress cancel scope leak from MCP SDK
                 if server._transport_cm:
-                    await server._transport_cm.__aexit__(None, None, None)
-            except Exception:
+                    try:
+                        await server._transport_cm.__aexit__(None, None, None)
+                    except BaseException:
+                        pass  # suppress cancel scope leak from MCP SDK
+            except BaseException:
                 pass
 
             del self._servers[name]
@@ -573,30 +594,60 @@ class MCPManager:
             )
             return f"Tool '{tool_name}' (description withheld — failed security scan)"
 
+    def resolve_tool_name(self, server_name: str, tool_name: str) -> str | None:
+        """Resolve a tool name with case-insensitive fallback.
+
+        Returns the canonical tool name if found, or None.
+        Logs a warning when case correction is applied.
+        """
+        if server_name not in self._servers:
+            return None
+        server_tools = self._servers[server_name].tools
+        # Exact match first
+        for t in server_tools:
+            if t.name == tool_name:
+                return t.name
+        # Case-insensitive fallback
+        lower = tool_name.lower()
+        for t in server_tools:
+            if t.name.lower() == lower:
+                logger.warning("Tool name corrected: '%s' → '%s'", tool_name, t.name)
+                return t.name
+        return None
+
     def get_tools_for_prompt(self) -> str:
         """
-        Format available tools for inclusion in LLM system prompt.
+        Format available MCP tools for inclusion in LLM system prompt.
 
-        Returns:
-            Formatted string describing all available tools
+        Returns clear instructions for using the native mcp_tool tool
+        with case-sensitive tool names and no JSON-in-text examples.
         """
-        # This is sync because it's used in prompt building
-        # We cache tools during connection so this is safe
         if not self._servers:
             return ""
 
-        lines = ["Available MCP Tools:"]
+        lines = ["MCP Tool Calling\n"]
+        lines.append("You have tools on external MCP servers. To call one, use the `mcp_tool` tool with:")
+        lines.append("- **tool**: Qualified name as `server-name:ToolName` — CASE SENSITIVE, copy exactly from list below")
+        lines.append("- **arguments**: The tool's parameters as an object")
+        lines.append("")
+        lines.append("CRITICAL RULES:")
+        lines.append("1. Tool names are CASE SENSITIVE. `HassTurnOn` is correct. `hass_turn_on`, `hassturnon` are WRONG.")
+        lines.append("2. You MUST use the `mcp_tool` tool to call MCP tools. Do NOT write JSON in your text.")
+        lines.append("3. NEVER fabricate a tool result. If you did not receive a tool_result, the call did not happen.")
+        lines.append("4. If a tool call errors, report the error honestly. Do not narrate fake success.")
+        lines.append("")
+        lines.append("### Available Tools\n")
 
         for name, server in self._servers.items():
             if not server.tools:
                 continue
 
-            lines.append(f"\n[{name}]")
+            lines.append(f"**{name}**")
             for tool in server.tools:
                 desc = self._safe_tool_description(
                     tool.description or "", tool.name, name
                 )
-                lines.append(f"  - {tool.name}: {desc}")
+                lines.append(f"- `{name}:{tool.name}` — {desc}")
 
                 # Add parameter info if available
                 if tool.inputSchema and "properties" in tool.inputSchema:
@@ -608,39 +659,22 @@ class MCPManager:
                             req = "*" if pname in required else ""
                             ptype = pschema.get("type", "any")
                             param_strs.append(f"{pname}{req}:{ptype}")
-                        lines.append(f"    Parameters: {', '.join(param_strs)}")
+                        lines.append(f"  Parameters: {', '.join(param_strs)}")
+            lines.append("")
 
-        # Add usage instructions with concrete examples
-        lines.append("\nWhen you want to use a tool, respond with ONLY this JSON format:")
-        lines.append("  {\"mcp_tool\": \"SERVER_NAME:tool_name\", \"arguments\": {\"param\": \"value\"}}")
-        lines.append("")
-        lines.append("IMPORTANT: Replace SERVER_NAME with the actual server name shown in brackets above.")
-
-        # Add concrete examples from the first available server
-        first_server = next(iter(self._servers.keys()), None)
-        if first_server and self._servers[first_server].tools:
-            tools = self._servers[first_server].tools
-            lines.append(f"\nExamples for [{first_server}]:")
-            if any(t.name == "itunes_play" for t in tools):
-                lines.append(f'  Play music: {{"mcp_tool": "{first_server}:itunes_play", "arguments": {{}}}}')
-            if any(t.name == "itunes_search" for t in tools):
-                lines.append(f'  Search: {{"mcp_tool": "{first_server}:itunes_search", "arguments": {{"query": "jazz"}}}}')
-            if any(t.name == "itunes_pause" for t in tools):
-                lines.append(f'  Pause: {{"mcp_tool": "{first_server}:itunes_pause", "arguments": {{}}}}')
-
-        # Add Home Assistant examples if connected
+        # Add Home Assistant-specific notes if connected
         if "home-assistant" in self._servers:
             ha_tools = self._servers["home-assistant"].tools
-            lines.append(f"\nExamples for [home-assistant]:")
-            lines.append("  IMPORTANT: For lights, use domain=['light']. Do NOT use device_class for lights.")
-            lines.append("  device_class is ONLY for covers (blind, shutter, curtain, etc), switches, outlets, TVs, speakers.")
-            lines.append("  Use 'area' for room-based commands (e.g., 'living room lights'). Use 'name' only for specific devices.")
+            lines.append("### Home Assistant Notes")
+            lines.append("- For lights, use domain=[\"light\"]. Do NOT use device_class for lights.")
+            lines.append("- device_class is ONLY for covers (blind, shutter, curtain, etc), switches, outlets, TVs, speakers.")
+            lines.append("- Use 'area' for room-based commands. Use 'name' only for specific named devices.")
             if any(t.name == "HassTurnOff" for t in ha_tools):
-                lines.append('  Turn off room lights: {"mcp_tool": "home-assistant:HassTurnOff", "arguments": {"area": "living room", "domain": ["light"]}}')
+                lines.append("- Turn off lights: tool=`home-assistant:HassTurnOff`, arguments={\"area\": \"living room\", \"domain\": [\"light\"]}")
             if any(t.name == "HassTurnOn" for t in ha_tools):
-                lines.append('  Turn on room lights: {"mcp_tool": "home-assistant:HassTurnOn", "arguments": {"area": "bedroom", "domain": ["light"]}}')
+                lines.append("- Turn on lights: tool=`home-assistant:HassTurnOn`, arguments={\"area\": \"bedroom\", \"domain\": [\"light\"]}")
             if any(t.name == "HassLightSet" for t in ha_tools):
-                lines.append('  Set brightness: {"mcp_tool": "home-assistant:HassLightSet", "arguments": {"area": "office", "brightness": 50}}')
+                lines.append("- Set brightness: tool=`home-assistant:HassLightSet`, arguments={\"area\": \"office\", \"brightness\": 50}")
 
         return "\n".join(lines)
 

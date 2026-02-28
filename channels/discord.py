@@ -223,6 +223,8 @@ class DiscordAdapter(ChannelAdapter):
         edit_count = 0
 
         async for chunk in self._safe_handle(self._handler, incoming):
+            if isinstance(chunk, dict):
+                continue
             accumulated += chunk
 
             now = time.monotonic()

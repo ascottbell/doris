@@ -5,6 +5,11 @@ Uses python-telegram-bot (v20+) in polling mode. Streams responses by
 sending an initial message and editing it every ~500ms as chunks arrive,
 giving users real-time feedback as Doris thinks.
 
+When users send media/files via Telegram (documents, photos, video, audio,
+etc.), the files are automatically downloaded and saved to ``data/telegram_files/``.
+The message text then includes the file path(s), so Doris can process or
+reference them if needed.
+
 Required env var:
     TELEGRAM_BOT_TOKEN — Bot token from @BotFather
 
@@ -22,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from telegram import Update
@@ -35,6 +41,7 @@ from telegram.ext import (
 )
 
 from channels.base import ChannelAdapter, IncomingMessage, collect_response
+from config import settings
 
 if TYPE_CHECKING:
     from channels.base import MessageHandler
@@ -97,7 +104,12 @@ class TelegramAdapter(ChannelAdapter):
         # Register handlers
         self._app.add_handler(CommandHandler("start", self._handle_start))
         self._app.add_handler(
-            TGMessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
+            TGMessageHandler(
+                (filters.TEXT | filters.Document.ALL | filters.PHOTO | filters.VIDEO
+                 | filters.AUDIO | filters.VOICE | filters.ANIMATION)
+                & ~filters.COMMAND,
+                self._handle_message,
+            )
         )
 
         # Initialize validates the token (get_me call)
@@ -137,19 +149,114 @@ class TelegramAdapter(ChannelAdapter):
         self._handler = None
         logger.info("Telegram adapter stopped.")
 
-    async def send_message(self, conversation_id: str, text: str) -> None:
+    async def send_message(
+        self,
+        conversation_id: str,
+        text: str,
+        metadata: dict | None = None,
+    ) -> None:
         """Send a proactive message to a Telegram chat.
 
         conversation_id is the Telegram chat_id as a string.
+
+        `metadata` is an optional dict that may contain a ``media`` key
+        (a list of media specifications).  Each media entry should include
+        at least ``type`` (e.g. ``photo``, ``document``) and ``file`` which
+        may be a file-like object, a local path, a URL, or an existing
+        Telegram ``file_id``.  A ``caption`` can accompany media.
+
+        If media is present we send it before any leftover text; otherwise
+        the behaviour is identical to the previous implementation.
         """
         self._check_running()
         assert self._app is not None
 
+        # handle media attachments if provided
+        media_list = []
+        if metadata:
+            media_list = metadata.get("media", []) or []
+
+        if media_list:
+            # send each media item; caption may consume the text for the
+            # first item
+            remaining_text = text
+            for i, m in enumerate(media_list):
+                typ = m.get("type")
+                file_obj = m.get("file")
+                caption = m.get("caption")
+                # the first media item can carry the overall text if no
+                # explicit caption is provided
+                if i == 0 and not caption and remaining_text:
+                    caption = remaining_text
+                    remaining_text = ""
+
+                send_kwargs = {"chat_id": int(conversation_id)}
+                if caption:
+                    send_kwargs["caption"] = caption
+
+                if typ == "photo":
+                    await self._app.bot.send_photo(photo=file_obj, **send_kwargs)
+                elif typ == "document":
+                    await self._app.bot.send_document(document=file_obj, **send_kwargs)
+                elif typ == "video":
+                    await self._app.bot.send_video(video=file_obj, **send_kwargs)
+                elif typ == "animation":
+                    await self._app.bot.send_animation(animation=file_obj, **send_kwargs)
+                elif typ == "audio":
+                    await self._app.bot.send_audio(audio=file_obj, **send_kwargs)
+                elif typ == "voice":
+                    await self._app.bot.send_voice(voice=file_obj, **send_kwargs)
+                elif typ == "sticker":
+                    await self._app.bot.send_sticker(sticker=file_obj, **send_kwargs)
+                elif typ == "video_note":
+                    await self._app.bot.send_video_note(video_note=file_obj, **send_kwargs)
+                else:
+                    # unknown media type, fall back to send_message for safety
+                    await self._app.bot.send_message(
+                        chat_id=int(conversation_id),
+                        text=f"[unsupported media type: {typ}]",
+                    )
+
+            # send any leftover text after media
+            if remaining_text:
+                for chunk in _split_message(remaining_text):
+                    await self._app.bot.send_message(
+                        chat_id=int(conversation_id),
+                        text=chunk,
+                    )
+            return
+
+        # no media: behave as before
         for chunk in _split_message(text):
             await self._app.bot.send_message(
                 chat_id=int(conversation_id),
                 text=chunk,
             )
+
+    async def _download_file(self, file_id: str, filename: str) -> str:
+        """Download a file from Telegram and save it locally.
+
+        Returns the path to the saved file (relative to data directory).
+        """
+        assert self._app is not None
+
+        try:
+            # Get file info and download
+            file_obj = await self._app.bot.get_file(file_id)
+            
+            # Create telegram_files directory
+            media_dir = settings.data_dir / "telegram_files"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save file
+            filepath = media_dir / filename
+            await file_obj.download_to_drive(filepath)
+            
+            # Return relative path for display
+            return str(filepath.relative_to(settings.data_dir))
+        except Exception as e:
+            logger.warning("Failed to download Telegram file %s: %s", file_id, e)
+            return f"[file-download-failed: {filename}]"
 
     # -- Telegram handlers ---------------------------------------------------
 
@@ -171,23 +278,84 @@ class TelegramAdapter(ChannelAdapter):
         update: Update,
         context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """Handle incoming text messages with streaming response edits."""
+        """Handle incoming messages with streaming response edits.
+
+        Supports both text and media. Media files are downloaded and saved
+        to disk; filenames are included in the outgoing message text.
+        """
         if not self._is_allowed(update):
             return
-        if not self._handler or not update.message or not update.message.text:
+        if not self._handler or not update.message:
             return
 
+        msg = update.message
+
+        # Determine primary text: prefer text, then caption
+        text = msg.text or msg.caption or ""
+
+        # Download and save any media files
+        saved_files: list[str] = []
+        if msg.document:
+            fpath = await self._download_file(
+                msg.document.file_id,
+                msg.document.file_name or "document",
+            )
+            saved_files.append(fpath)
+        elif msg.photo:
+            # Take the largest photo
+            fpath = await self._download_file(
+                msg.photo[-1].file_id,
+                f"photo_{msg.message_id}.jpg",
+            )
+            saved_files.append(fpath)
+        elif msg.video:
+            fpath = await self._download_file(
+                msg.video.file_id,
+                msg.video.file_name or f"video_{msg.message_id}.mp4",
+            )
+            saved_files.append(fpath)
+        elif msg.audio:
+            fpath = await self._download_file(
+                msg.audio.file_id,
+                msg.audio.file_name or f"audio_{msg.message_id}.mp3",
+            )
+            saved_files.append(fpath)
+        elif msg.voice:
+            fpath = await self._download_file(
+                msg.voice.file_id,
+                f"voice_{msg.message_id}.ogg",
+            )
+            saved_files.append(fpath)
+        elif msg.animation:
+            fpath = await self._download_file(
+                msg.animation.file_id,
+                msg.animation.file_name or f"animation_{msg.message_id}.gif",
+            )
+            saved_files.append(fpath)
+
+        # Append file paths to message text
+        if saved_files:
+            file_refs = " ".join(saved_files)
+            text = f"{text} {file_refs}".strip() if text else file_refs
+
+        if not text:
+            # nothing for the handler to process
+            return
+
+        metadata = {
+            "message_id": msg.message_id,
+            "chat_type": update.effective_chat.type,
+        }
+
         incoming = IncomingMessage(
-            text=update.message.text,
+            text=text,
             sender_id=str(update.effective_user.id),
             conversation_id=str(update.effective_chat.id),
             channel="telegram",
             sender_name=update.effective_user.full_name,
-            timestamp=update.message.date,
-            metadata={
-                "message_id": update.message.message_id,
-                "chat_type": update.effective_chat.type,
-            },
+            timestamp=msg.date,
+            metadata=metadata,
+            media=[],  # media already downloaded and included in text
         )
 
         # Send "thinking" placeholder
@@ -197,8 +365,14 @@ class TelegramAdapter(ChannelAdapter):
         accumulated = ""
         last_edit_time = 0.0
         edit_count = 0
+        pending_media: list[dict] = []
 
         async for chunk in self._safe_handle(self._handler, incoming):
+            # Dict chunks carry side-channel data (e.g., media from MCP tools)
+            if isinstance(chunk, dict):
+                pending_media.extend(chunk.get("media", []))
+                continue
+
             accumulated += chunk
 
             now = time.monotonic()
@@ -239,12 +413,32 @@ class TelegramAdapter(ChannelAdapter):
                 except Exception:
                     pass
 
+        # Send any media files accumulated during tool execution
+        if pending_media:
+            logger.info(
+                "Sending %d media item(s) to %s",
+                len(pending_media),
+                incoming.conversation_id,
+            )
+            try:
+                await self.send_message(
+                    incoming.conversation_id,
+                    "",
+                    metadata={"media": pending_media},
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send media to %s",
+                    incoming.conversation_id,
+                )
+
         logger.debug(
-            "Message from %s: %d chunks, %d edits, %d chars",
+            "Message from %s: %d chunks, %d edits, %d chars, %d media",
             incoming.sender_id,
             edit_count,
             edit_count,
             len(accumulated),
+            len(pending_media),
         )
 
     # -- Helpers -------------------------------------------------------------
@@ -280,7 +474,6 @@ class TelegramAdapter(ChannelAdapter):
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
-
 
 def _truncate(text: str) -> str:
     """Truncate text to fit Telegram's message limit."""
@@ -325,6 +518,10 @@ def create_telegram_adapter(
     edit_interval: float = 0.5,
 ) -> TelegramAdapter:
     """Factory that creates a TelegramAdapter from config strings.
+
+    The adapter now supports sending and receiving arbitrary media
+    types.  To send media proactively, provide a ``metadata`` dict with a
+    ``media`` key when calling ``send_message`` on the adapter.
 
     Args:
         token: Bot token from @BotFather.

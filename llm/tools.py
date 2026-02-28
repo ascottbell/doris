@@ -770,6 +770,31 @@ _RAW_TOOLS = [
             "required": ["service", "action"]
         }
     },
+    # Generic MCP tool — routes to any connected MCP server
+    {
+        "name": "mcp_tool",
+        "description": (
+            "Call a tool on a connected MCP server. "
+            "The 'tool' parameter MUST be an exact, case-sensitive qualified name "
+            "from the MCP tool list: 'server-name:ToolName' "
+            "(e.g. 'home-assistant:HassTurnOn', NOT 'hass_turn_on'). "
+            "Do NOT alter the casing or spelling."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tool": {
+                    "type": "string",
+                    "description": "Qualified name as 'server:ToolName'. CASE SENSITIVE — copy exactly. Example: 'home-assistant:HassTurnOn' (not 'hass_turn_on')."
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments to pass to the tool"
+                }
+            },
+            "required": ["tool"]
+        }
+    },
     # Scout status
     {
         "name": "get_scout_status",
